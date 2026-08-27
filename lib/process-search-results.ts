@@ -34,10 +34,12 @@ export function extractDomain(raw: string): string {
 }
 
 export function normalizePersonName(name: string): string {
+  if (!name.trim()) return name
   return name
     .trim()
-    .toLowerCase()
-    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .split(/\s+/)
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ')
 }
 
 export function normalizeCompanyName(name: string): string {
