@@ -80,8 +80,8 @@ export async function getInboxConfig(): Promise<InboxConfig> {
     .from("inbox_config")
     .select("product_context, calendly_link, exclude_clients")
     .eq("id", 1)
-    .single()
-  return { product_context: data?.product_context ?? null, calendly_link: data?.calendly_link ?? null, exclude_clients: data?.exclude_clients ?? null }
+    .maybeSingle()
+  return { product_context: data?.product_context ?? null, calendly_link: data?.calendly_link ?? null, exclude_clients: (data as Record<string, unknown>)?.exclude_clients as boolean | null ?? null }
 }
 
 export async function saveInboxConfig(config: InboxConfig): Promise<void> {

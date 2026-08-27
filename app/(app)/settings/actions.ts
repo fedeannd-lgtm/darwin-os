@@ -152,7 +152,7 @@ export async function getClientCompanies(): Promise<ClientCompany[]> {
     .from("client_companies")
     .select("id, company_name, linkedin_url, sales_nav_id, domain")
     .order("company_name")
-  if (error) throw new Error(error.message)
+  if (error) return [] // table may not exist yet — migration pending
   return (data ?? []) as ClientCompany[]
 }
 
