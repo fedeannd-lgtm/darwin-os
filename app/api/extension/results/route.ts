@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
-import { processCompanySearch, processPeopleSearch, extractDomain, type RawCompany, type RawPerson } from "@/lib/process-search-results"
+import { processCompanySearch, processPeopleSearch, extractDomain, normalizeCompanyName, type RawCompany, type RawPerson } from "@/lib/process-search-results"
 
 const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type", "Access-Control-Allow-Private-Network": "true" }
 
@@ -26,8 +26,22 @@ export async function POST(req: NextRequest) {
   if (!job) return NextResponse.json({ error: "Job no encontrado" }, { status: 404 })
 
   if (job.job_type === "company_search") {
+    // Check client exclusion toggle
+    const [{ data: cfg }, { data: clients }] = await Promise.all([
+      supabaseAdmin.from("inbox_config").select("exclude_clients").eq("id", 1).single(),
+      supabaseAdmin.from("client_companies").select("company_name"),
+    ])
+    const clientSet = cfg?.exclude_clients
+      ? new Set((clients ?? []).map((c: { company_name: string }) => normalizeCompanyName(c.company_name)))
+      : new Set<string>()
+
+    function filterClients(items: RawCompany[]): RawCompany[] {
+      if (clientSet.size === 0) return items
+      return items.filter((c) => !clientSet.has(normalizeCompanyName(c.companyName ?? "")))
+    }
+
     if (body.done) {
-      await processCompanySearch(jobId, job, body.items as RawCompany[])
+      await processCompanySearch(jobId, job, filterClients(body.items as RawCompany[]))
     } else {
       // Partial batch — mark running, insert without closing job
       const { data: existing } = await supabaseAdmin
@@ -38,7 +52,7 @@ export async function POST(req: NextRequest) {
       if (existing?.status === "pending") {
         await supabaseAdmin.from("search_jobs").update({ status: "running" }).eq("id", jobId)
       }
-      const accounts = (body.items as RawCompany[]).map((c) => ({
+      const accounts = filterClients(body.items as RawCompany[]).map((c) => ({
         campaign_id: job.campaign_id,
         company_name: c.companyName ?? "",
         domain: c.website ?? "",

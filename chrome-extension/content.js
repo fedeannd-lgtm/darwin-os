@@ -16,6 +16,16 @@
     return;
   }
 
+  // ── Mode: client list — resolve step (navigating company search pages) ───────
+  const clientListState = (() => {
+    try { return JSON.parse(sessionStorage.getItem('prospectOS_client_list') || 'null'); }
+    catch { return null; }
+  })();
+  if (clientListState && window.location.pathname.startsWith('/sales/search/company')) {
+    await resumeClientListFlow(clientListState);
+    return;
+  }
+
   // ── Mode: count results ──────────────────────────────────────────────────────
   if (window.location.pathname.startsWith('/sales/search/people')) {
     const pos = hashParams.get('_pos');
@@ -105,8 +115,17 @@
     return;
   }
 
+  if (mode === 'create_client_list' && scrapeCb) {
+    await runCreateClientList(decodedCb);
+    return;
+  }
+
   // ── Mode: create account list ────────────────────────────────────────────────
   if (!params.has('prospectOS')) return;
+  if (params.get('prospectOS') === 'create_client_list' && params.get('_cb')) {
+    await runCreateClientList(decodeURIComponent(params.get('_cb')));
+    return;
+  }
   if (params.get('prospectOS') !== 'create') return;
 
   const campaignId = params.get('campaignId');
@@ -1018,4 +1037,246 @@ function findNextButton() {
     if (btn) return btn;
   }
   return null;
+}
+
+// ── Create client list ────────────────────────────────────────────────────────
+// Flow: for each company we navigate to Sales Nav company search, wait for DOM
+// results, grab the ID from the first result link (/sales/company/ID/), then
+// create the list via API — same pattern as runCompanyProfileVisit.
+
+async function runCreateClientList(appBaseUrl) {
+  const overlay = createOverlay();
+  const { setStatus, setProgress } = overlay;
+
+  try {
+    // 1. Fetch company list from ProspectOS
+    setStatus('Cargando lista de clientes…');
+    const res = await fetch(`${appBaseUrl}/api/extension/client-companies`);
+    if (!res.ok) throw new Error(`No se pudo cargar la lista (${res.status})`);
+    const { companies } = await res.json();
+    if (!companies || companies.length === 0) throw new Error('No hay empresas en la Lista de clientes. Agregá empresas en Settings primero.');
+
+    // 2. Split: already-resolved vs need search navigation
+    const alreadyResolved = companies
+      .filter(c => c.sales_nav_id)
+      .map(c => ({ company_name: c.company_name, sales_nav_id: c.sales_nav_id }));
+    const toResolve = companies.filter(c => !c.sales_nav_id);
+
+    if (toResolve.length === 0) {
+      // All already known — go straight to list creation
+      setStatus('IDs ya guardados. Creando lista…');
+      await doCreateList(alreadyResolved, appBaseUrl, { setStatus, setProgress }, companies.length);
+      return;
+    }
+
+    // 3. Start navigation loop: go to company search for first company
+    //    State survives across page navigations via sessionStorage
+    setStatus(`Buscando ${toResolve.length} empresa${toResolve.length > 1 ? 's' : ''} en Sales Navigator…`);
+    setProgress(`Navegando a: ${toResolve[0].company_name}`);
+
+    const state = {
+      appBaseUrl,
+      toResolve,
+      resolved: alreadyResolved,
+      currentIndex: 0,
+      totalCount: companies.length,
+    };
+    sessionStorage.setItem('prospectOS_client_list', JSON.stringify(state));
+
+    await new Promise(r => setTimeout(r, 800));
+    window.location.href = `/sales/search/company?keywords=${encodeURIComponent(cleanSearchName(toResolve[0].company_name))}`;
+    // Page will reload → resumeClientListFlow picks up the state
+
+  } catch (err) {
+    setStatus('❌ Error: ' + err.message);
+    setProgress('Cerrá esta pestaña y revisá la configuración en ProspectOS.');
+    console.error('[ProspectOS create_client_list]', err);
+  }
+}
+
+// Strip domain-like words from a company name so search works better.
+// "Cervecería Quilmes quilmes.com.ar" → "Cervecería Quilmes"
+function cleanSearchName(name) {
+  const cleaned = name
+    .split(/\s+/)
+    .filter(word => !/^[\w.-]+\.[a-z]{2,6}(\.[a-z]{2,3})?$/i.test(word))
+    .join(' ')
+    .trim();
+  return cleaned || name;
+}
+
+// Find all anchor links matching a pattern, piercing shadow roots.
+// querySelectorAll doesn't cross shadow boundaries in Lit/React components.
+function findLinksDeep(root, hrefFragment) {
+  const results = [];
+  function traverse(node) {
+    if (!node) return;
+    if (node.shadowRoot) traverse(node.shadowRoot);
+    if (node.querySelectorAll) {
+      node.querySelectorAll(`a[href*="${hrefFragment}"]`).forEach(el => results.push(el));
+    }
+    if (node.children) Array.from(node.children).forEach(traverse);
+  }
+  traverse(root);
+  return results;
+}
+
+// Called on each page load while state exists (we're navigating one search per company)
+async function resumeClientListFlow(state) {
+  const { appBaseUrl, toResolve, resolved, currentIndex, totalCount } = state;
+  const overlay = createOverlay();
+  const { setStatus, setProgress } = overlay;
+
+  const current = toResolve[currentIndex];
+  const displayName = cleanSearchName(current.company_name);
+  setStatus(`Capturando ID: "${displayName}" (${currentIndex + 1}/${toResolve.length})`);
+  setProgress('Esperando resultados…');
+
+  // Wait for Sales Nav company search results to appear.
+  // Strategy 1: look for /sales/company/ID/ links in DOM (incl. shadow roots).
+  // Strategy 2: check Performance API for salesApiCompanies responses (IDs are in the URL).
+  let companyId = null;
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    // Shadow-DOM-aware link search
+    const links = findLinksDeep(document.body, '/sales/company/');
+    for (const link of links) {
+      const m = (link.getAttribute('href') || '').match(/\/sales\/company\/(\d+)/);
+      if (m) { companyId = m[1]; break; }
+    }
+    if (companyId) break;
+
+    // Fallback: parse salesApiCompanies URL from Performance entries
+    // The page fetches e.g. /sales-api/salesApiCompanies?ids=List(urn%3Ali%3Afs_salesCompany%3A12345,...)
+    if (!companyId) {
+      const entries = performance.getEntriesByType('resource');
+      for (const entry of entries) {
+        if (entry.name.includes('salesApiCompanies') && entry.name.includes('ids=List(')) {
+          const m = entry.name.match(/urn%3Ali%3Afs_salesCompany%3A(\d+)/);
+          if (m) { companyId = m[1]; break; }
+        }
+      }
+    }
+    if (companyId) break;
+
+    if (/no result|sin resultado|0 result/i.test(document.body?.innerText || '')) break;
+    await new Promise(r => setTimeout(r, 600));
+  }
+
+  const newResolved = [...resolved];
+  if (companyId) {
+    setProgress(`✓ ${displayName} → ${companyId}`);
+    newResolved.push({ company_name: current.company_name, sales_nav_id: companyId });
+  } else {
+    setProgress(`⚠ No encontrado: ${displayName}`);
+  }
+  console.log('[ProspectOS client_list]', displayName, '→', companyId ?? 'NOT FOUND');
+
+  await new Promise(r => setTimeout(r, 800));
+
+  const nextIndex = currentIndex + 1;
+  if (nextIndex < toResolve.length) {
+    const nextState = { ...state, resolved: newResolved, currentIndex: nextIndex };
+    sessionStorage.setItem('prospectOS_client_list', JSON.stringify(nextState));
+    const nextName = cleanSearchName(toResolve[nextIndex].company_name);
+    window.location.href = `/sales/search/company?keywords=${encodeURIComponent(nextName)}`;
+  } else {
+    sessionStorage.removeItem('prospectOS_client_list');
+    await doCreateList(newResolved, appBaseUrl, { setStatus, setProgress }, totalCount);
+  }
+}
+
+// Creates the "Lista de clientes" in Sales Nav and reports IDs back to ProspectOS
+async function doCreateList(resolved, appBaseUrl, { setStatus, setProgress }, totalCount) {
+  if (resolved.length === 0) {
+    setStatus('❌ No se pudo encontrar ninguna empresa en Sales Navigator.');
+    setProgress('Intentá agregar las URLs de LinkedIn de cada empresa en Settings.');
+    return;
+  }
+
+  const jsessionRaw = document.cookie.split(';')
+    .map(c => c.trim().split('='))
+    .find(([k]) => k === 'JSESSIONID')?.[1]?.replace(/"/g, '') || '';
+  const csrfToken = jsessionRaw.startsWith('ajax:') ? jsessionRaw : `ajax:${jsessionRaw}`;
+  if (!csrfToken || csrfToken === 'ajax:') throw new Error('No se encontró el CSRF token.');
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json, text/plain, */*',
+    'csrf-token': csrfToken,
+    'x-restli-protocol-version': '2.0.0',
+    'x-requested-with': 'XMLHttpRequest',
+    'x-li-lang': 'es_AR',
+    'x-li-track': JSON.stringify({
+      clientVersion: '1.13.9787', mpVersion: '1.13.9787', osName: 'web',
+      timezoneOffset: -3, timezone: 'America/Argentina/Buenos_Aires',
+      deviceFormFactor: 'DESKTOP', mpName: 'sales-navigator-web',
+      displayDensity: 1, displayWidth: 1920, displayHeight: 1080,
+    }),
+    'x-li-page-instance': 'urn:li:page:sales_navigator_lists;' + Math.random().toString(36).slice(2),
+  };
+
+  const listName = 'Lista de clientes';
+  setStatus(`Creando lista "${listName}"…`);
+  setProgress('');
+
+  let listId = null;
+  for (const body of [
+    { name: listName, listType: 'ACCOUNT', role: 'OWNER' },
+    { name: listName, listType: 'ACCOUNT' },
+  ]) {
+    const r = await fetch('/sales-api/salesApiLists', {
+      method: 'POST', credentials: 'include', headers, body: JSON.stringify(body),
+    });
+    if (r.ok) {
+      const data = await r.json();
+      let rawId = data.id ?? data.listId ?? data.entityUrn ?? '';
+      if (typeof rawId === 'string' && rawId.includes(':')) rawId = rawId.split(':').pop();
+      if (rawId && String(rawId) !== 'undefined') { listId = String(rawId); break; }
+    }
+    await new Promise(r => setTimeout(r, 300));
+  }
+
+  if (!listId) {
+    const r = await fetch('/sales-api/salesApiAccountLists', {
+      method: 'POST', credentials: 'include', headers, body: JSON.stringify({ name: listName }),
+    });
+    if (r.ok) {
+      const data = await r.json();
+      let rawId = data.id ?? data.listId ?? data.entityUrn ?? '';
+      if (typeof rawId === 'string' && rawId.includes(':')) rawId = rawId.split(':').pop();
+      if (rawId) listId = String(rawId);
+    }
+  }
+
+  if (!listId) throw new Error('No se pudo crear la lista en Sales Navigator.');
+
+  let ok = 0;
+  for (let i = 0; i < resolved.length; i++) {
+    const { company_name, sales_nav_id } = resolved[i];
+    setStatus(`Agregando empresas… (${i + 1}/${resolved.length})`);
+    setProgress(company_name);
+    const r = await fetch('/sales-api/salesApiListEntities?action=edit', {
+      method: 'POST', credentials: 'include', headers,
+      body: JSON.stringify({
+        entity: `urn:li:fs_salesCompany:${sales_nav_id}`,
+        addToLists: [listId],
+        removeFromLists: [],
+      }),
+    });
+    if (r.ok) ok++;
+    await new Promise(r => setTimeout(r, 250));
+  }
+
+  // Report resolved IDs back to ProspectOS (saves them so next run skips lookup)
+  await fetch(`${appBaseUrl}/api/extension/client-companies`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ results: resolved }),
+  }).catch(() => {});
+
+  const notFound = totalCount - resolved.length;
+  setStatus(`✅ Listo — ${ok}/${resolved.length} empresas agregadas a "${listName}"`);
+  setProgress(notFound > 0 ? `${notFound} empresa${notFound > 1 ? 's' : ''} no encontrada${notFound > 1 ? 's' : ''} en Sales Nav` : 'Todas las empresas encontradas ✓');
+  setTimeout(() => window.close(), 5000);
 }

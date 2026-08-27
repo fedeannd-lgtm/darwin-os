@@ -137,6 +137,67 @@ export async function getCampaignIndustries(): Promise<string[]> {
   return unique.sort()
 }
 
+// ── Client companies ──────────────────────────────────────────────────────────
+
+export type ClientCompany = {
+  id: string
+  company_name: string
+  linkedin_url: string | null
+  sales_nav_id: string | null
+  domain: string | null
+}
+
+export async function getClientCompanies(): Promise<ClientCompany[]> {
+  const { data, error } = await supabase
+    .from("client_companies")
+    .select("id, company_name, linkedin_url, sales_nav_id, domain")
+    .order("company_name")
+  if (error) throw new Error(error.message)
+  return (data ?? []) as ClientCompany[]
+}
+
+export async function saveClientCompanies(
+  entries: { company_name: string; linkedin_url?: string | null; domain?: string | null }[]
+): Promise<void> {
+  // Deduplicate by normalized name
+  const seen = new Set<string>()
+  const rows = entries
+    .filter((e) => e.company_name.trim())
+    .filter((e) => {
+      const key = e.company_name.trim().toLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .map((e) => ({ company_name: e.company_name.trim(), linkedin_url: e.linkedin_url || null, domain: e.domain || null }))
+
+  await supabaseAdmin.from("client_companies").delete().neq("id", "00000000-0000-0000-0000-000000000000")
+  if (rows.length > 0) await supabaseAdmin.from("client_companies").insert(rows)
+  revalidatePath("/settings")
+}
+
+export async function updateClientCompanySalesNavIds(
+  results: { company_name: string; sales_nav_id: string }[]
+): Promise<void> {
+  for (const { company_name, sales_nav_id } of results) {
+    await supabaseAdmin
+      .from("client_companies")
+      .update({ sales_nav_id })
+      .eq("company_name", company_name)
+  }
+}
+
+export async function updateClientCompanyLinkedinUrl(
+  id: string,
+  linkedin_url: string | null
+): Promise<void> {
+  await supabaseAdmin
+    .from("client_companies")
+    .update({ linkedin_url: linkedin_url || null })
+    .eq("id", id)
+  revalidatePath("/settings")
+}
+
 export async function upsertRepCookie(repName: string, cookie: string) {
   const { error } = await supabaseAdmin
     .from("rep_configs")
