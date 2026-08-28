@@ -29,7 +29,7 @@ type SearchJob = {
   created_at: string
   completed_at: string | null
   estimated_ready_at?: string | null
-  campaigns: { week_label: string; rep_name: string; industry: string } | null
+  campaigns: { week_label: string; rep_name: string; industry: string; list_id: string | null; list_name: string | null } | null
 }
 
 type SearchConfig = {
@@ -127,11 +127,16 @@ function JobCard({ job, onDelete }: { job: SearchJob; onDelete: () => void }) {
         </div>
       </div>
       {job.status === "completed" && (
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <Link href={`/campaigns/${job.campaign_id}`} className="inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-xs font-medium hover:bg-muted transition-colors">
             <Building2 className="size-3" />
             Ver empresas
           </Link>
+          {job.campaigns?.list_id ? (
+            <span className="text-xs text-green-600 font-medium">✓ Lista registrada</span>
+          ) : (
+            <span className="text-xs text-muted-foreground">Sin lista — abrir en Sales Nav para registrar</span>
+          )}
         </div>
       )}
     </div>
@@ -433,8 +438,8 @@ export function CompanySearchClient({
                   {excludedCount === null
                     ? "Calculando…"
                     : excludedCount === 0
-                    ? "No hay empresas de campañas anteriores para excluir"
-                    : <><span className="font-medium text-foreground">{excludedCount.toLocaleString()}</span> empresas de campañas anteriores serán excluidas</>
+                    ? "Sin listas registradas de campañas anteriores"
+                    : <><span className="font-medium text-foreground">{excludedCount}</span> lista{excludedCount !== 1 ? "s" : ""} de campañas anteriores se excluirán en el URL</>
                   }
                 </p>
               )}

@@ -6,6 +6,53 @@
 
   console.log('[ProspectOS] hash:', window.location.hash);
 
+  // ── Auto-register Sales Nav account list ─────────────────────────────────────
+  // When the user navigates to a Sales Nav list page after a company search,
+  // the extension auto-sends the list_id + list_name to ProspectOS.
+  const listPageMatch = window.location.pathname.match(/^\/sales\/lists\/accounts\/(\d+)/);
+  if (listPageMatch) {
+    const listId = listPageMatch[1];
+    const storedCampaignId = localStorage.getItem('_pos_campaign_id');
+    const storedCb = localStorage.getItem('_pos_cb');
+    if (storedCampaignId && storedCb) {
+      (async () => {
+        // Wait for SPA to render the list name
+        await new Promise(r => setTimeout(r, 2000));
+
+        let listName = `Lista ${listId}`;
+        const titleText = document.title.replace(/\s*\|.*$/, '').trim();
+        if (titleText && titleText !== 'LinkedIn Sales Navigator') listName = titleText;
+        const h1 = document.querySelector('h1');
+        if (h1?.textContent?.trim()) listName = h1.textContent.trim();
+
+        const badge = document.createElement('div');
+        badge.style.cssText = 'position:fixed;bottom:20px;right:20px;background:rgba(0,0,0,0.80);color:#fff;border-radius:8px;padding:10px 16px;font-size:13px;font-weight:500;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;z-index:999999;pointer-events:none;';
+        badge.textContent = '⏳ ProspectOS: registrando lista…';
+        document.body.appendChild(badge);
+
+        try {
+          const base = new URL(storedCb).origin;
+          const r = await fetch(`${base}/api/extension/register-list`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ campaignId: storedCampaignId, listId, listName }),
+          });
+          if (r.ok) {
+            badge.style.background = 'rgba(22,163,74,0.92)';
+            badge.textContent = `✅ Lista "${listName}" registrada en ProspectOS`;
+            localStorage.removeItem('_pos_campaign_id');
+          } else {
+            badge.textContent = '⚠️ Error al registrar lista en ProspectOS';
+          }
+        } catch {
+          badge.textContent = '⚠️ No se pudo conectar con ProspectOS';
+        }
+        setTimeout(() => badge.remove(), 4000);
+      })();
+    }
+    // Don't return — allow other checks to continue
+  }
+
   // ── Mode: company profile visit (phase 2 of company scrape) ─────────────────
   const profileVisitState = (() => {
     try { return JSON.parse(sessionStorage.getItem('prospectOS_company_visit') || 'null'); }
@@ -111,6 +158,12 @@
   }
 
   if (mode === 'company_scrape' && jobId && scrapeCb) {
+    // Store campaign_id so the list-page detector can register the list later
+    const campaignParam = hashParams.get('_campaign');
+    if (campaignParam) {
+      localStorage.setItem('_pos_campaign_id', campaignParam);
+      localStorage.setItem('_pos_cb', decodedCb);
+    }
     await runCompanyScrape(jobId, decodedCb, maxResults);
     return;
   }

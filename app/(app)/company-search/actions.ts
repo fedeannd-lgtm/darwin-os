@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache"
 import { supabase, supabaseAdmin } from "@/lib/supabase"
-import { normalizeCompanyName } from "@/lib/process-search-results"
+import { addExclusionListsToUrl } from "@/lib/sales-nav-lists"
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL
   || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000")
@@ -19,7 +19,7 @@ export async function getCampaigns() {
 export async function getCompanySearchJobs() {
   const { data, error } = await supabase
     .from("search_jobs")
-    .select("*, campaigns(week_label, rep_name, industry)")
+    .select("*, campaigns(week_label, rep_name, industry, list_id, list_name)")
     .eq("job_type", "company_search")
     .order("created_at", { ascending: false })
     .limit(20)
@@ -75,8 +75,28 @@ export async function triggerCompanySearch(
       const pageSep = urlToOpen.includes('#') ? '&' : '#'
       urlToOpen += `${pageSep}page=${startPage}`
     }
+
+    // Embed previous campaign lists as EXCLUDED filters in the Sales Nav URL
+    const { data: cfg } = await supabaseAdmin
+      .from("inbox_config").select("exclude_previous").eq("id", 1).single()
+    if (cfg?.exclude_previous) {
+      const { data: prevCampaigns } = await supabaseAdmin
+        .from("campaigns")
+        .select("list_id, list_name, week_label")
+        .eq("industry", industry)
+        .neq("id", campaignId)
+        .not("list_id", "is", null)
+      if (prevCampaigns?.length) {
+        const lists = prevCampaigns.map((c: { list_id: string | null; list_name: string | null; week_label: string }) => ({
+          id: c.list_id!,
+          name: c.list_name ?? c.week_label ?? c.list_id!,
+        }))
+        urlToOpen = addExclusionListsToUrl(urlToOpen, lists)
+      }
+    }
+
     const hashSep = urlToOpen.includes('#') ? '&' : '#'
-    const extensionUrl = `${urlToOpen}${hashSep}_mode=company_scrape&_job=${job.id}&_max=${maxResults}&_cb=${callbackUrl}`
+    const extensionUrl = `${urlToOpen}${hashSep}_mode=company_scrape&_job=${job.id}&_campaign=${campaignId}&_max=${maxResults}&_cb=${callbackUrl}`
 
     revalidatePath("/company-search")
     return { jobId: job.id, extensionUrl }
@@ -120,17 +140,13 @@ export async function getExcludedPreviousCount(campaignId: string): Promise<numb
     .from("campaigns").select("industry").eq("id", campaignId).single()
   if (!campaign?.industry) return 0
 
-  const { data: sameCampaigns } = await supabaseAdmin
-    .from("campaigns").select("id")
-    .eq("industry", campaign.industry).neq("id", campaignId)
-  const ids = (sameCampaigns ?? []).map((c: { id: string }) => c.id)
-  if (!ids.length) return 0
-
-  const { data: accounts } = await supabaseAdmin
-    .from("accounts").select("company_name").in("campaign_id", ids)
-  return new Set(
-    (accounts ?? []).map((a: { company_name: string }) => normalizeCompanyName(a.company_name ?? "")).filter(Boolean)
-  ).size
+  const { count } = await supabaseAdmin
+    .from("campaigns")
+    .select("id", { count: "exact", head: true })
+    .eq("industry", campaign.industry)
+    .neq("id", campaignId)
+    .not("list_id", "is", null)
+  return count ?? 0
 }
 
 export async function getJobStatus(jobId: string) {
