@@ -115,12 +115,21 @@ export async function deleteSearchJobs(ids: string[]): Promise<void> {
 }
 
 export async function getExcludedPreviousCount(campaignId: string): Promise<number> {
-  const { data } = await supabaseAdmin
-    .from("accounts")
-    .select("sales_nav_id")
-    .neq("campaign_id", campaignId)
-    .not("sales_nav_id", "is", null)
-  return new Set((data ?? []).map((a) => a.sales_nav_id)).size
+  const { data: campaign } = await supabaseAdmin
+    .from("campaigns").select("industry").eq("id", campaignId).single()
+  if (!campaign?.industry) return 0
+
+  const { data: sameCampaigns } = await supabaseAdmin
+    .from("campaigns").select("id")
+    .eq("industry", campaign.industry).neq("id", campaignId)
+  const ids = (sameCampaigns ?? []).map((c: { id: string }) => c.id)
+  if (!ids.length) return 0
+
+  const { data: accounts } = await supabaseAdmin
+    .from("accounts").select("company_name").in("campaign_id", ids)
+  return new Set(
+    (accounts ?? []).map((a: { company_name: string }) => normalizeCompanyName(a.company_name ?? "")).filter(Boolean)
+  ).size
 }
 
 export async function getJobStatus(jobId: string) {

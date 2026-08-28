@@ -26,25 +26,41 @@ export async function POST(req: NextRequest) {
   if (!job) return NextResponse.json({ error: "Job no encontrado" }, { status: 404 })
 
   if (job.job_type === "company_search") {
-    // Load config + exclusion data in parallel
-    const [{ data: cfg }, { data: clients }, { data: previousAccounts }] = await Promise.all([
+    const campaignIndustry = (job.campaigns as { industry: string } | null)?.industry ?? null
+
+    const [{ data: cfg }, { data: clients }] = await Promise.all([
       supabaseAdmin.from("inbox_config").select("exclude_clients, exclude_previous").eq("id", 1).single(),
       supabaseAdmin.from("client_companies").select("company_name"),
-      supabaseAdmin.from("accounts").select("sales_nav_id").neq("campaign_id", job.campaign_id).not("sales_nav_id", "is", null),
     ])
 
     const clientSet = cfg?.exclude_clients
       ? new Set((clients ?? []).map((c: { company_name: string }) => normalizeCompanyName(c.company_name)))
       : new Set<string>()
 
-    const previousSet = cfg?.exclude_previous
-      ? new Set((previousAccounts ?? []).map((a: { sales_nav_id: string | null }) => a.sales_nav_id).filter(Boolean) as string[])
-      : new Set<string>()
+    const previousIdSet = new Set<string>()
+    const previousNameSet = new Set<string>()
+
+    if (cfg?.exclude_previous && campaignIndustry) {
+      const { data: sameCampaigns } = await supabaseAdmin
+        .from("campaigns").select("id")
+        .eq("industry", campaignIndustry).neq("id", job.campaign_id)
+      const ids = (sameCampaigns ?? []).map((c: { id: string }) => c.id)
+      if (ids.length > 0) {
+        const { data: prevAccounts } = await supabaseAdmin
+          .from("accounts").select("sales_nav_id, company_name").in("campaign_id", ids)
+        for (const a of prevAccounts ?? []) {
+          if (a.sales_nav_id) previousIdSet.add(a.sales_nav_id)
+          const name = normalizeCompanyName(a.company_name ?? "")
+          if (name) previousNameSet.add(name)
+        }
+      }
+    }
 
     function applyFilters(items: RawCompany[]): RawCompany[] {
       return items.filter((c) => {
         if (clientSet.size > 0 && clientSet.has(normalizeCompanyName(c.companyName ?? ""))) return false
-        if (previousSet.size > 0 && c.id && previousSet.has(c.id)) return false
+        if (c.id && previousIdSet.has(c.id)) return false
+        if (previousNameSet.has(normalizeCompanyName(c.companyName ?? ""))) return false
         return true
       })
     }
