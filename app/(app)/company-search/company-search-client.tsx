@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { getSearchConfig, triggerCompanySearch, getJobStatus, deleteSearchJobs } from "./actions"
+import { getInboxConfig, saveInboxConfig } from "../inbox/actions"
 
 type Campaign = {
   id: string
@@ -140,9 +141,11 @@ function JobCard({ job, onDelete }: { job: SearchJob; onDelete: () => void }) {
 export function CompanySearchClient({
   campaigns,
   initialJobs,
+  initialExcludePrevious,
 }: {
   campaigns: Campaign[]
   initialJobs: SearchJob[]
+  initialExcludePrevious: boolean
 }) {
   const [jobs, setJobs] = useState<SearchJob[]>(initialJobs)
   const [campaignId, setCampaignId] = useState("")
@@ -151,8 +154,10 @@ export function CompanySearchClient({
   const [maxResults, setMaxResults] = useState(50)
   const [startPage, setStartPage] = useState(1)
   const [comboOpen, setComboOpen] = useState(false)
+  const [excludePrevious, setExcludePrevious] = useState(initialExcludePrevious)
   const [isPending, startTransition] = useTransition()
   const [isDeleting, startDeleting] = useTransition()
+  const [isTogglingExclude, startToggleExclude] = useTransition()
   const [error, setError] = useState("")
 
   const selectedCampaign = campaigns.find((c) => c.id === campaignId)
@@ -203,6 +208,15 @@ export function CompanySearchClient({
 
     return () => clearInterval(interval)
   }, [jobs])
+
+  function handleToggleExcludePrevious() {
+    const next = !excludePrevious
+    setExcludePrevious(next)
+    startToggleExclude(async () => {
+      const current = await getInboxConfig()
+      await saveInboxConfig({ ...current, exclude_previous: next })
+    })
+  }
 
   function handleTrigger() {
     setError("")
@@ -376,6 +390,27 @@ export function CompanySearchClient({
                   La extensión visita cada perfil · listo en ~{Math.max(1, Math.ceil(maxResults * 2.5 / 60))} min
                 </p>
               )}
+            </div>
+
+            {/* Exclude previous campaigns toggle */}
+            <div className="flex items-center justify-between rounded-lg border p-3">
+              <div className="space-y-0.5">
+                <p className="text-sm font-medium">Excluir campañas anteriores</p>
+                <p className="text-xs text-muted-foreground">
+                  Omite empresas ya scraped en otras campañas
+                </p>
+              </div>
+              <button
+                role="switch"
+                aria-checked={excludePrevious}
+                onClick={handleToggleExcludePrevious}
+                disabled={isTogglingExclude}
+                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                  excludePrevious ? "bg-primary" : "bg-input"
+                }`}
+              >
+                <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-lg transform transition-transform ${excludePrevious ? "translate-x-4" : "translate-x-0"}`} />
+              </button>
             </div>
 
             {error && <p className="text-sm text-destructive">{error}</p>}
