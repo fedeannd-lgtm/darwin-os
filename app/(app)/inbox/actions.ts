@@ -41,6 +41,7 @@ export type InboxConfig = {
   product_context: string | null
   calendly_link: string | null
   exclude_clients: boolean | null
+  exclude_previous: boolean | null
 }
 
 export async function getReplies(filter: "pending_review" | "draft_ready" | "sent" | "dismissed" | "all" = "all"): Promise<ProspectReply[]> {
@@ -78,10 +79,15 @@ export async function getPendingCount(): Promise<number> {
 export async function getInboxConfig(): Promise<InboxConfig> {
   const { data } = await supabase
     .from("inbox_config")
-    .select("product_context, calendly_link, exclude_clients")
+    .select("product_context, calendly_link, exclude_clients, exclude_previous")
     .eq("id", 1)
     .maybeSingle()
-  return { product_context: data?.product_context ?? null, calendly_link: data?.calendly_link ?? null, exclude_clients: (data as Record<string, unknown>)?.exclude_clients as boolean | null ?? null }
+  return {
+    product_context: data?.product_context ?? null,
+    calendly_link: data?.calendly_link ?? null,
+    exclude_clients: (data as Record<string, unknown>)?.exclude_clients as boolean | null ?? null,
+    exclude_previous: (data as Record<string, unknown>)?.exclude_previous as boolean | null ?? false,
+  }
 }
 
 export async function saveInboxConfig(config: InboxConfig): Promise<void> {

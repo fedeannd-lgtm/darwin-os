@@ -26,22 +26,31 @@ export async function POST(req: NextRequest) {
   if (!job) return NextResponse.json({ error: "Job no encontrado" }, { status: 404 })
 
   if (job.job_type === "company_search") {
-    // Check client exclusion toggle
-    const [{ data: cfg }, { data: clients }] = await Promise.all([
-      supabaseAdmin.from("inbox_config").select("exclude_clients").eq("id", 1).single(),
+    // Load config + exclusion data in parallel
+    const [{ data: cfg }, { data: clients }, { data: previousAccounts }] = await Promise.all([
+      supabaseAdmin.from("inbox_config").select("exclude_clients, exclude_previous").eq("id", 1).single(),
       supabaseAdmin.from("client_companies").select("company_name"),
+      supabaseAdmin.from("accounts").select("sales_nav_id").neq("campaign_id", job.campaign_id).not("sales_nav_id", "is", null),
     ])
+
     const clientSet = cfg?.exclude_clients
       ? new Set((clients ?? []).map((c: { company_name: string }) => normalizeCompanyName(c.company_name)))
       : new Set<string>()
 
-    function filterClients(items: RawCompany[]): RawCompany[] {
-      if (clientSet.size === 0) return items
-      return items.filter((c) => !clientSet.has(normalizeCompanyName(c.companyName ?? "")))
+    const previousSet = cfg?.exclude_previous
+      ? new Set((previousAccounts ?? []).map((a: { sales_nav_id: string | null }) => a.sales_nav_id).filter(Boolean) as string[])
+      : new Set<string>()
+
+    function applyFilters(items: RawCompany[]): RawCompany[] {
+      return items.filter((c) => {
+        if (clientSet.size > 0 && clientSet.has(normalizeCompanyName(c.companyName ?? ""))) return false
+        if (previousSet.size > 0 && c.id && previousSet.has(c.id)) return false
+        return true
+      })
     }
 
     if (body.done) {
-      await processCompanySearch(jobId, job, filterClients(body.items as RawCompany[]))
+      await processCompanySearch(jobId, job, applyFilters(body.items as RawCompany[]))
     } else {
       // Partial batch — mark running, insert without closing job
       const { data: existing } = await supabaseAdmin
@@ -52,7 +61,7 @@ export async function POST(req: NextRequest) {
       if (existing?.status === "pending") {
         await supabaseAdmin.from("search_jobs").update({ status: "running" }).eq("id", jobId)
       }
-      const accounts = filterClients(body.items as RawCompany[]).map((c) => ({
+      const accounts = applyFilters(body.items as RawCompany[]).map((c) => ({
         campaign_id: job.campaign_id,
         company_name: c.companyName ?? "",
         domain: c.website ?? "",

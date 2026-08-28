@@ -369,12 +369,15 @@ const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "https://darwin-os.vercel.app
 function ClientListCard({
   initialCompanies,
   initialExclude,
+  initialExcludePrevious,
 }: {
   initialCompanies: ClientCompany[]
   initialExclude: boolean
+  initialExcludePrevious: boolean
 }) {
   const [companies, setCompanies] = useState<ClientCompany[]>(initialCompanies)
   const [excludeClients, setExcludeClients] = useState(initialExclude)
+  const [excludePrevious, setExcludePrevious] = useState(initialExcludePrevious)
   const [isPending, startTransition] = useTransition()
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState("")
@@ -429,6 +432,15 @@ function ClientListCard({
     startTransition(async () => {
       const current = await getInboxConfig()
       await saveInboxConfig({ ...current, exclude_clients: next })
+    })
+  }
+
+  function handleToggleExcludePrevious() {
+    const next = !excludePrevious
+    setExcludePrevious(next)
+    startTransition(async () => {
+      const current = await getInboxConfig()
+      await saveInboxConfig({ ...current, exclude_previous: next })
     })
   }
 
@@ -601,7 +613,7 @@ function ClientListCard({
           )}
         </div>
 
-        {/* Exclusion toggle */}
+        {/* Exclusion toggles */}
         <div className="flex items-center justify-between rounded-lg border p-3">
           <div className="space-y-0.5">
             <p className="text-sm font-medium">Excluir de company search</p>
@@ -621,6 +633,26 @@ function ClientListCard({
             <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-lg transform transition-transform ${excludeClients ? "translate-x-4" : "translate-x-0"}`} />
           </button>
         </div>
+
+        <div className="flex items-center justify-between rounded-lg border p-3">
+          <div className="space-y-0.5">
+            <p className="text-sm font-medium">Excluir empresas de campañas anteriores</p>
+            <p className="text-xs text-muted-foreground">
+              Si una empresa ya fue scraped en otra campaña, no se vuelve a agregar
+            </p>
+          </div>
+          <button
+            role="switch"
+            aria-checked={excludePrevious}
+            onClick={handleToggleExcludePrevious}
+            disabled={isPending}
+            className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+              excludePrevious ? "bg-primary" : "bg-input"
+            }`}
+          >
+            <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-lg transform transition-transform ${excludePrevious ? "translate-x-4" : "translate-x-0"}`} />
+          </button>
+        </div>
       </CardContent>
     </Card>
   )
@@ -634,7 +666,8 @@ function InboxSettingsCard({ initialConfig }: { initialConfig: InboxConfig }) {
 
   function handleSave() {
     startTransition(async () => {
-      await saveInboxConfig({ product_context: productContext || null, calendly_link: calendlyLink || null, exclude_clients: null })
+      const current = await getInboxConfig()
+      await saveInboxConfig({ ...current, product_context: productContext || null, calendly_link: calendlyLink || null })
       setSaved(true)
       setTimeout(() => setSaved(false), 3000)
     })
@@ -772,7 +805,7 @@ export function SettingsClient({ savedUrls, providerStatus: initialProviderStatu
 
       <SavedUrlsCard initialUrls={savedUrls} allIndustries={allIndustries} />
 
-      <ClientListCard initialCompanies={clientCompanies} initialExclude={inboxConfig.exclude_clients ?? false} />
+      <ClientListCard initialCompanies={clientCompanies} initialExclude={inboxConfig.exclude_clients ?? false} initialExcludePrevious={inboxConfig.exclude_previous ?? false} />
 
       <InboxSettingsCard initialConfig={inboxConfig} />
     </div>
