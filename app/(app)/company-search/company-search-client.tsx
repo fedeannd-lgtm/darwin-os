@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
-import { getSearchConfig, triggerCompanySearch, getJobStatus, deleteSearchJobs } from "./actions"
+import { getSearchConfig, triggerCompanySearch, getJobStatus, deleteSearchJobs, getExcludedPreviousCount } from "./actions"
 import { getInboxConfig, saveInboxConfig } from "../inbox/actions"
 
 type Campaign = {
@@ -155,6 +155,7 @@ export function CompanySearchClient({
   const [startPage, setStartPage] = useState(1)
   const [comboOpen, setComboOpen] = useState(false)
   const [excludePrevious, setExcludePrevious] = useState(initialExcludePrevious)
+  const [excludedCount, setExcludedCount] = useState<number | null>(null)
   const [isPending, startTransition] = useTransition()
   const [isDeleting, startDeleting] = useTransition()
   const [isTogglingExclude, startToggleExclude] = useTransition()
@@ -185,6 +186,12 @@ export function CompanySearchClient({
       .catch(() => setError("Error cargando configuración"))
       .finally(() => setConfigLoading(false))
   }, [selectedCampaign?.id, selectedCampaign?.rep_name, selectedCampaign?.industry])
+
+  // Load excluded count when toggle is on and campaign selected
+  useEffect(() => {
+    if (!excludePrevious || !campaignId) { setExcludedCount(null); return }
+    getExcludedPreviousCount(campaignId).then(setExcludedCount)
+  }, [excludePrevious, campaignId])
 
   // Poll running jobs every 10s
   useEffect(() => {
@@ -331,9 +338,17 @@ export function CompanySearchClient({
                     </div>
                     <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                       <Link2 className="size-3 shrink-0" />
-                      <span className="truncate font-mono">{config.base_url.slice(0, 60)}…</span>
+                      <a
+                        href={config.base_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="truncate font-mono hover:text-foreground hover:underline transition-colors"
+                        title={config.base_url}
+                      >
+                        {config.base_url.slice(0, 60)}…
+                      </a>
                       <Link href="/settings" className="ml-auto shrink-0 text-xs text-muted-foreground hover:text-foreground transition-colors">
-                        Cambiar en Settings ↗
+                        Cambiar ↗
                       </Link>
                     </div>
                     <div className="flex items-center gap-2 text-xs">
@@ -393,24 +408,36 @@ export function CompanySearchClient({
             </div>
 
             {/* Exclude previous campaigns toggle */}
-            <div className="flex items-center justify-between rounded-lg border p-3">
-              <div className="space-y-0.5">
-                <p className="text-sm font-medium">Excluir campañas anteriores</p>
-                <p className="text-xs text-muted-foreground">
-                  Omite empresas ya scraped en otras campañas
-                </p>
+            <div className="rounded-lg border p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <p className="text-sm font-medium">Excluir campañas anteriores</p>
+                  <p className="text-xs text-muted-foreground">
+                    Omite empresas ya scraped en otras campañas
+                  </p>
+                </div>
+                <button
+                  role="switch"
+                  aria-checked={excludePrevious}
+                  onClick={handleToggleExcludePrevious}
+                  disabled={isTogglingExclude}
+                  className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                    excludePrevious ? "bg-primary" : "bg-input"
+                  }`}
+                >
+                  <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-lg transform transition-transform ${excludePrevious ? "translate-x-4" : "translate-x-0"}`} />
+                </button>
               </div>
-              <button
-                role="switch"
-                aria-checked={excludePrevious}
-                onClick={handleToggleExcludePrevious}
-                disabled={isTogglingExclude}
-                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                  excludePrevious ? "bg-primary" : "bg-input"
-                }`}
-              >
-                <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-lg transform transition-transform ${excludePrevious ? "translate-x-4" : "translate-x-0"}`} />
-              </button>
+              {excludePrevious && campaignId && (
+                <p className="text-xs text-muted-foreground">
+                  {excludedCount === null
+                    ? "Calculando…"
+                    : excludedCount === 0
+                    ? "No hay empresas de campañas anteriores para excluir"
+                    : <><span className="font-medium text-foreground">{excludedCount.toLocaleString()}</span> empresas de campañas anteriores serán excluidas</>
+                  }
+                </p>
+              )}
             </div>
 
             {error && <p className="text-sm text-destructive">{error}</p>}

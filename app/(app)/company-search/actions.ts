@@ -114,6 +114,15 @@ export async function deleteSearchJobs(ids: string[]): Promise<void> {
   revalidatePath("/company-search")
 }
 
+export async function getExcludedPreviousCount(campaignId: string): Promise<number> {
+  const { data } = await supabaseAdmin
+    .from("accounts")
+    .select("sales_nav_id")
+    .neq("campaign_id", campaignId)
+    .not("sales_nav_id", "is", null)
+  return new Set((data ?? []).map((a) => a.sales_nav_id)).size
+}
+
 export async function getJobStatus(jobId: string) {
   const { data, error } = await supabase
     .from("search_jobs")
