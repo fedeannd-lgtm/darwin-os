@@ -139,12 +139,13 @@ export async function getExcludedPreviousCount(campaignId: string): Promise<numb
     .from("campaigns").select("industry").eq("id", campaignId).single()
   if (!campaign?.industry) return 0
 
-  const { count } = await supabaseAdmin
+  const { data } = await supabaseAdmin
     .from("campaigns")
-    .select("id", { count: "exact", head: true })
+    .select("list_id")
     .eq("industry", campaign.industry)
     .not("list_id", "is", null)
-  return count ?? 0
+  if (!data) return 0
+  return new Set(data.map((c) => c.list_id)).size
 }
 
 export async function getPreviewUrl(
