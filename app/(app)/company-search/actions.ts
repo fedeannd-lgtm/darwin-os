@@ -147,6 +147,39 @@ export async function getExcludedPreviousCount(campaignId: string): Promise<numb
   return count ?? 0
 }
 
+export async function getPreviewUrl(
+  repName: string,
+  industry: string,
+  startPage: number,
+  excludePrevious: boolean
+): Promise<string | null> {
+  const config = await getSearchConfig(repName, industry)
+  if (!config) return null
+
+  let urlToOpen = config.base_url
+  if (startPage > 1) {
+    const pageSep = urlToOpen.includes("#") ? "&" : "#"
+    urlToOpen += `${pageSep}page=${startPage}`
+  }
+
+  if (excludePrevious) {
+    const { data: prevCampaigns } = await supabaseAdmin
+      .from("campaigns")
+      .select("list_id, list_name, week_label")
+      .eq("industry", industry)
+      .not("list_id", "is", null)
+    if (prevCampaigns?.length) {
+      const lists = prevCampaigns.map((c: { list_id: string | null; list_name: string | null; week_label: string }) => ({
+        id: c.list_id!,
+        name: c.list_name ?? c.week_label ?? c.list_id!,
+      }))
+      urlToOpen = addExclusionListsToUrl(urlToOpen, lists)
+    }
+  }
+
+  return urlToOpen
+}
+
 export async function getJobStatus(jobId: string) {
   const { data, error } = await supabase
     .from("search_jobs")

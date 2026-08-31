@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
-import { getSearchConfig, triggerCompanySearch, getJobStatus, deleteSearchJobs, getExcludedPreviousCount } from "./actions"
+import { getSearchConfig, triggerCompanySearch, getJobStatus, deleteSearchJobs, getExcludedPreviousCount, getPreviewUrl } from "./actions"
 import { getInboxConfig, saveInboxConfig } from "../inbox/actions"
 
 type Campaign = {
@@ -161,6 +161,7 @@ export function CompanySearchClient({
   const [comboOpen, setComboOpen] = useState(false)
   const [excludePrevious, setExcludePrevious] = useState(initialExcludePrevious)
   const [excludedCount, setExcludedCount] = useState<number | null>(null)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [isPending, startTransition] = useTransition()
   const [isDeleting, startDeleting] = useTransition()
   const [isTogglingExclude, startToggleExclude] = useTransition()
@@ -197,6 +198,13 @@ export function CompanySearchClient({
     if (!excludePrevious || !campaignId) { setExcludedCount(null); return }
     getExcludedPreviousCount(campaignId).then(setExcludedCount)
   }, [excludePrevious, campaignId])
+
+  // Load preview URL whenever campaign, config, startPage, or exclusion toggle changes
+  useEffect(() => {
+    if (!selectedCampaign || !config) { setPreviewUrl(null); return }
+    getPreviewUrl(selectedCampaign.rep_name, selectedCampaign.industry, startPage, excludePrevious)
+      .then(setPreviewUrl)
+  }, [selectedCampaign?.id, config, startPage, excludePrevious])
 
   // Poll running jobs every 10s
   useEffect(() => {
@@ -346,18 +354,24 @@ export function CompanySearchClient({
                     <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                       <Link2 className="size-3 shrink-0" />
                       <a
-                        href={config.base_url}
+                        href={previewUrl ?? config.base_url}
                         target="_blank"
                         rel="noreferrer"
                         className="truncate font-mono hover:text-foreground hover:underline transition-colors"
-                        title={config.base_url}
+                        title={previewUrl ?? config.base_url}
                       >
-                        {config.base_url.slice(0, 60)}…
+                        {(previewUrl ?? config.base_url).slice(0, 60)}…
                       </a>
                       <Link href="/settings" className="ml-auto shrink-0 text-xs text-muted-foreground hover:text-foreground transition-colors">
                         Cambiar ↗
                       </Link>
                     </div>
+                    {excludePrevious && excludedCount !== null && excludedCount > 0 && previewUrl && previewUrl.includes("EXCLUDED") && (
+                      <p className="text-xs text-green-600 font-medium">✓ {excludedCount} lista{excludedCount !== 1 ? "s" : ""} EXCLUDED embebida{excludedCount !== 1 ? "s" : ""} en el URL</p>
+                    )}
+                    {excludePrevious && excludedCount !== null && excludedCount > 0 && previewUrl && !previewUrl.includes("EXCLUDED") && (
+                      <p className="text-xs text-amber-600">⚠ No se pudo embeber las exclusiones — revisá el formato del URL base en Settings</p>
+                    )}
                     <div className="flex items-center gap-2 text-xs">
                       <span className="text-muted-foreground">Página de inicio:</span>
                       <input
