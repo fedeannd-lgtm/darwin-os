@@ -84,7 +84,6 @@ export async function triggerCompanySearch(
         .from("campaigns")
         .select("list_id, list_name, week_label")
         .eq("industry", industry)
-        .neq("id", campaignId)
         .not("list_id", "is", null)
       if (prevCampaigns?.length) {
         const lists = prevCampaigns.map((c: { list_id: string | null; list_name: string | null; week_label: string }) => ({
@@ -144,7 +143,6 @@ export async function getExcludedPreviousCount(campaignId: string): Promise<numb
     .from("campaigns")
     .select("id", { count: "exact", head: true })
     .eq("industry", campaign.industry)
-    .neq("id", campaignId)
     .not("list_id", "is", null)
   return count ?? 0
 }
