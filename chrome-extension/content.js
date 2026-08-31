@@ -821,7 +821,7 @@ async function scrapeCompaniesWhileScrolling(globalSeen) {
   }
 
   function collectVisible() {
-    const allLinks = document.querySelectorAll('a[href*="/sales/company/"]');
+    const allLinks = queryShadowAll('a[href*="/sales/company/"]');
     console.log('[ProspectOS] company links total:', allLinks.length);
     allLinks.forEach((link) => {
       try {
@@ -832,10 +832,16 @@ async function scrapeCompaniesWhileScrolling(globalSeen) {
         const id = idMatch?.[1] || '';
         if (!id || globalSeen.has(id)) return;
 
-        const card = link.closest('li') || link.closest('[data-x-search-result]');
-        if (!card) { console.log('[ProspectOS] no card for id:', id, href); return; }
+        // Traverse shadow boundary if the link lives inside a shadow root
+        const shadowRoot = link.getRootNode();
+        const shadowHost = shadowRoot instanceof ShadowRoot ? shadowRoot.host : null;
+        const card = link.closest('li') || link.closest('[data-x-search-result]') ||
+                     shadowHost?.closest('li') || shadowHost?.closest('[data-x-search-result]');
 
-        const nameEl = card.querySelector('[data-anonymize="company-name"]');
+        const nameEl = card
+          ? (card.querySelector('[data-anonymize="company-name"]') ||
+             queryShadowAll('[data-anonymize="company-name"]', card)[0])
+          : queryShadowAll('[data-anonymize="company-name"]', link.parentElement || link)[0];
         const companyName = nameEl?.textContent?.trim() || link.textContent?.trim() || '';
         console.log('[ProspectOS] candidate id:', id, 'name:', companyName || '(empty)', 'href:', href.slice(0, 80));
 
@@ -1074,10 +1080,19 @@ function getAllDocs() {
   return docs;
 }
 
+function queryShadowAll(selector, root = document) {
+  const results = [];
+  try { results.push(...root.querySelectorAll(selector)); } catch (e) {}
+  root.querySelectorAll('*').forEach(el => {
+    if (el.shadowRoot) results.push(...queryShadowAll(selector, el.shadowRoot));
+  });
+  return results;
+}
+
 function queryAllDocs(selector) {
   const results = [];
   getAllDocs().forEach(doc => {
-    try { results.push(...doc.querySelectorAll(selector)); } catch (e) {}
+    results.push(...queryShadowAll(selector, doc));
   });
   return results;
 }
