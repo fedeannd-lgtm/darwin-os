@@ -84,6 +84,7 @@ export async function triggerCompanySearch(
         .from("campaigns")
         .select("list_id, list_name, week_label")
         .eq("industry", industry)
+        .eq("rep_name", repName)
         .not("list_id", "is", null)
       if (prevCampaigns?.length) {
         const lists = prevCampaigns.map((c: { list_id: string | null; list_name: string | null; week_label: string }) => ({
@@ -136,13 +137,14 @@ export async function deleteSearchJobs(ids: string[]): Promise<void> {
 
 export async function getExcludedPreviousCount(campaignId: string): Promise<number> {
   const { data: campaign } = await supabaseAdmin
-    .from("campaigns").select("industry").eq("id", campaignId).single()
-  if (!campaign?.industry) return 0
+    .from("campaigns").select("industry, rep_name").eq("id", campaignId).single()
+  if (!campaign?.industry || !campaign?.rep_name) return 0
 
   const { data } = await supabaseAdmin
     .from("campaigns")
     .select("list_id")
     .eq("industry", campaign.industry)
+    .eq("rep_name", campaign.rep_name)
     .not("list_id", "is", null)
   if (!data) return 0
   return new Set(data.map((c) => c.list_id)).size
@@ -168,6 +170,7 @@ export async function getPreviewUrl(
       .from("campaigns")
       .select("list_id, list_name, week_label")
       .eq("industry", industry)
+      .eq("rep_name", repName)
       .not("list_id", "is", null)
     if (prevCampaigns?.length) {
       const lists = prevCampaigns.map((c: { list_id: string | null; list_name: string | null; week_label: string }) => ({
