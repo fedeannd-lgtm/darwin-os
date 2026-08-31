@@ -41,12 +41,23 @@ export async function getSearchConfig(repName: string, industry: string) {
   return { base_url: savedUrl.url, current_page: (savedUrl.current_page as number) ?? 1 }
 }
 
+/** Returns ISO cutoff date for a range string, or null for "all" */
+function getCutoffDate(range: string): string | null {
+  const daysMap: Record<string, number> = {
+    week: 7, month: 30, "3months": 90, "6months": 180, year: 365,
+  }
+  const days = daysMap[range]
+  if (!days) return null
+  return new Date(Date.now() - days * 86400000).toISOString()
+}
+
 export async function triggerCompanySearch(
   campaignId: string,
   repName: string,
   industry: string,
   maxResults: number,
-  startPageOverride?: number
+  startPageOverride?: number,
+  excludeRange?: string
 ): Promise<{ jobId: string; extensionUrl: string } | { error: string }> {
   try {
     const config = await getSearchConfig(repName, industry)
@@ -80,12 +91,15 @@ export async function triggerCompanySearch(
     const { data: cfg } = await supabaseAdmin
       .from("inbox_config").select("exclude_previous").eq("id", 1).single()
     if (cfg?.exclude_previous) {
-      const { data: prevCampaigns } = await supabaseAdmin
+      let prevQuery = supabaseAdmin
         .from("campaigns")
         .select("list_id, list_name, week_label")
         .eq("industry", industry)
         .eq("rep_name", repName)
         .not("list_id", "is", null)
+      const cutoff = getCutoffDate(excludeRange ?? "all")
+      if (cutoff) prevQuery = prevQuery.gte("created_at", cutoff)
+      const { data: prevCampaigns } = await prevQuery
       if (prevCampaigns?.length) {
         const lists = prevCampaigns.map((c: { list_id: string | null; list_name: string | null; week_label: string }) => ({
           id: c.list_id!,
@@ -135,17 +149,20 @@ export async function deleteSearchJobs(ids: string[]): Promise<void> {
   revalidatePath("/company-search")
 }
 
-export async function getExcludedPreviousCount(campaignId: string): Promise<number> {
+export async function getExcludedPreviousCount(campaignId: string, excludeRange = "all"): Promise<number> {
   const { data: campaign } = await supabaseAdmin
     .from("campaigns").select("industry, rep_name").eq("id", campaignId).single()
   if (!campaign?.industry || !campaign?.rep_name) return 0
 
-  const { data } = await supabaseAdmin
+  let query = supabaseAdmin
     .from("campaigns")
     .select("list_id")
     .eq("industry", campaign.industry)
     .eq("rep_name", campaign.rep_name)
     .not("list_id", "is", null)
+  const cutoff = getCutoffDate(excludeRange)
+  if (cutoff) query = query.gte("created_at", cutoff)
+  const { data } = await query
   if (!data) return 0
   return new Set(data.map((c) => c.list_id)).size
 }
@@ -154,7 +171,8 @@ export async function getPreviewUrl(
   repName: string,
   industry: string,
   startPage: number,
-  excludePrevious: boolean
+  excludePrevious: boolean,
+  excludeRange = "all"
 ): Promise<string | null> {
   const config = await getSearchConfig(repName, industry)
   if (!config) return null
@@ -166,12 +184,15 @@ export async function getPreviewUrl(
   }
 
   if (excludePrevious) {
-    const { data: prevCampaigns } = await supabaseAdmin
+    let prevQuery = supabaseAdmin
       .from("campaigns")
       .select("list_id, list_name, week_label")
       .eq("industry", industry)
       .eq("rep_name", repName)
       .not("list_id", "is", null)
+    const cutoff = getCutoffDate(excludeRange)
+    if (cutoff) prevQuery = prevQuery.gte("created_at", cutoff)
+    const { data: prevCampaigns } = await prevQuery
     if (prevCampaigns?.length) {
       const lists = prevCampaigns.map((c: { list_id: string | null; list_name: string | null; week_label: string }) => ({
         id: c.list_id!,

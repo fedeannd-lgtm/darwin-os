@@ -160,6 +160,10 @@ export function CompanySearchClient({
   const [startPage, setStartPage] = useState(1)
   const [comboOpen, setComboOpen] = useState(false)
   const [excludePrevious, setExcludePrevious] = useState(initialExcludePrevious)
+  const [excludeRange, setExcludeRange] = useState<string>(() => {
+    if (typeof window !== "undefined") return localStorage.getItem("_pos_exclude_range") ?? "all"
+    return "all"
+  })
   const [excludedCount, setExcludedCount] = useState<number | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [isPending, startTransition] = useTransition()
@@ -196,15 +200,15 @@ export function CompanySearchClient({
   // Load excluded count when toggle is on and campaign selected
   useEffect(() => {
     if (!excludePrevious || !campaignId) { setExcludedCount(null); return }
-    getExcludedPreviousCount(campaignId).then(setExcludedCount)
-  }, [excludePrevious, campaignId])
+    getExcludedPreviousCount(campaignId, excludeRange).then(setExcludedCount)
+  }, [excludePrevious, campaignId, excludeRange])
 
-  // Load preview URL whenever campaign, config, startPage, or exclusion toggle changes
+  // Load preview URL whenever campaign, config, startPage, exclusion toggle, or range changes
   useEffect(() => {
     if (!selectedCampaign || !config) { setPreviewUrl(null); return }
-    getPreviewUrl(selectedCampaign.rep_name, selectedCampaign.industry, startPage, excludePrevious)
+    getPreviewUrl(selectedCampaign.rep_name, selectedCampaign.industry, startPage, excludePrevious, excludeRange)
       .then(setPreviewUrl)
-  }, [selectedCampaign?.id, config, startPage, excludePrevious])
+  }, [selectedCampaign?.id, config, startPage, excludePrevious, excludeRange])
 
   // Poll running jobs every 10s
   useEffect(() => {
@@ -229,6 +233,11 @@ export function CompanySearchClient({
     return () => clearInterval(interval)
   }, [jobs])
 
+  function handleRangeChange(val: string) {
+    setExcludeRange(val)
+    localStorage.setItem("_pos_exclude_range", val)
+  }
+
   function handleToggleExcludePrevious() {
     const next = !excludePrevious
     setExcludePrevious(next)
@@ -249,7 +258,8 @@ export function CompanySearchClient({
         selectedCampaign.rep_name,
         selectedCampaign.industry,
         maxResults,
-        startPage
+        startPage,
+        excludeRange
       )
       if ("error" in result) {
         setError(result.error)
@@ -449,13 +459,30 @@ export function CompanySearchClient({
                   <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-lg transform transition-transform ${excludePrevious ? "translate-x-4" : "translate-x-0"}`} />
                 </button>
               </div>
+              {excludePrevious && (
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-muted-foreground shrink-0">Fecha de listas:</label>
+                  <select
+                    value={excludeRange}
+                    onChange={(e) => handleRangeChange(e.target.value)}
+                    className="flex-1 rounded border border-input bg-background px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+                  >
+                    <option value="week">Semana anterior</option>
+                    <option value="month">Último mes</option>
+                    <option value="3months">Últimos 3 meses</option>
+                    <option value="6months">Últimos 6 meses</option>
+                    <option value="year">Último año</option>
+                    <option value="all">Todas</option>
+                  </select>
+                </div>
+              )}
               {excludePrevious && campaignId && (
                 <p className="text-xs text-muted-foreground">
                   {excludedCount === null
                     ? "Calculando…"
                     : excludedCount === 0
-                    ? "Sin listas registradas de campañas anteriores"
-                    : <><span className="font-medium text-foreground">{excludedCount}</span> lista{excludedCount !== 1 ? "s" : ""} de campañas anteriores se excluirán en el URL</>
+                    ? "Sin listas en ese período"
+                    : <><span className="font-medium text-foreground">{excludedCount}</span> lista{excludedCount !== 1 ? "s" : ""} se excluirán en el URL</>
                   }
                 </p>
               )}
