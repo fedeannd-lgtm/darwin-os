@@ -263,6 +263,8 @@ export function CompanySearchClient({
           week_label: selectedCampaign.week_label,
           rep_name: selectedCampaign.rep_name,
           industry: selectedCampaign.industry,
+          list_id: null,
+          list_name: null,
         },
       }
       setJobs((prev) => [newJob, ...prev])
