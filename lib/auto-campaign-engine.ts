@@ -256,6 +256,15 @@ async function advancePeopleSearch(auto: AutoCampaign) {
     }
   }
 
+  // Si no hay nada que enriquecer, saltar directo a distribución
+  const needsEnrichment = auto.enrich_emails || auto.enrich_phones || auto.classify_icp
+  if (!needsEnrichment) {
+    await supabaseAdmin.from("campaigns").update({ status: "distributing" }).eq("id", auto.campaign_id)
+    await setStatus(auto.id, "distributing", { current_step_detail: "Enriquecimiento omitido. Distribuyendo…" })
+    await advanceDistributing({ ...auto, status: "distributing" })
+    return
+  }
+
   await supabaseAdmin.from("campaigns").update({ status: "enriching" }).eq("id", auto.campaign_id)
   await setStatus(auto.id, "enriching", {
     enrichment_offset: 0,
@@ -263,7 +272,6 @@ async function advancePeopleSearch(auto: AutoCampaign) {
   })
 
   // Run first enrichment batch inline — avoids unreliable fire-and-forget from within after()
-  // BATCH_SIZE=5 so ~15s per batch; well within the 60s maxDuration
   await advanceEnriching({ ...auto, status: "enriching", enrichment_offset: 0 })
 }
 

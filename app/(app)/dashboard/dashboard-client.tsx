@@ -1092,7 +1092,7 @@ export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats, 
                   </div>
                 ))}
                 <span className="ml-2 text-xs text-muted-foreground">
-                  {["Campaña", "Company Search", "People Search", "Enrichment", "Horario"][autoStep - 1]}
+                  {["Campaña", "Company Search", "People Search", "Enrichment (opc.)", "Distribución (opc.)"][autoStep - 1]}
                 </span>
               </div>
             )}
@@ -1349,6 +1349,7 @@ export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats, 
             {/* Step 4: Enrichment */}
             {campaignMode === "auto" && autoStep === 4 && (
               <div className="space-y-4">
+                <p className="text-xs text-muted-foreground">Opcional — si dejás todo sin marcar, el pipeline pasa directo a distribución.</p>
                 <div className="grid grid-cols-2 gap-3">
                   {[
                     { key: "enrich_emails", label: "Buscar emails" },
