@@ -1,6 +1,11 @@
-import { NextRequest, NextResponse } from "next/server"
+import { NextRequest, NextResponse, after } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { processCompanySearch, processPeopleSearch, extractDomain, normalizeCompanyName, type RawCompany, type RawPerson } from "@/lib/process-search-results"
+import { advanceAutoCampaigns } from "@/lib/auto-campaign-engine"
+
+export const maxDuration = 60
+
+// normalizeCompanyName used only for client exclusion filter below
 
 const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type", "Access-Control-Allow-Private-Network": "true" }
 
@@ -44,6 +49,8 @@ export async function POST(req: NextRequest) {
 
     if (body.done) {
       await processCompanySearch(jobId, job, applyFilters(body.items as RawCompany[]))
+      // Advance after response is sent (after() is guaranteed by Vercel, unlike fire-and-forget)
+      after(async () => { await advanceAutoCampaigns().catch((err) => console.error("[results] advanceAutoCampaigns:", err)) })
     } else {
       // Partial batch — mark running, insert without closing job
       const { data: existing } = await supabaseAdmin
@@ -67,6 +74,8 @@ export async function POST(req: NextRequest) {
   } else {
     if (body.done) {
       await processPeopleSearch(jobId, job, body.items as RawPerson[])
+      // Advance after response — transitions people_search→enriching (self-trigger fires first batch)
+      after(async () => { await advanceAutoCampaigns().catch((err) => console.error("[results] advanceAutoCampaigns:", err)) })
     } else {
       // Batch parcial — insertar sin cerrar el job
       // Reutilizar processPeopleSearch con done=false sería complejo,

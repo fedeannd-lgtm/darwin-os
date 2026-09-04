@@ -1,10 +1,11 @@
 "use client"
 
 import { useState, useTransition, useMemo, useEffect, useRef } from "react"
+import { useRouter } from "next/navigation"
 import { REPS as BASE_REPS, INDUSTRIES } from "@/lib/reps"
 const REPS = ["Todos", ...BASE_REPS]
 const REP_OPTIONS = BASE_REPS
-import { Plus, Pencil, Trash2, Building2, Users, Send, Mail, ChevronLeft, ChevronRight, LayoutList, CalendarDays, CalendarIcon, BarChart3, ChevronsUpDown, Check } from "lucide-react"
+import { Plus, Pencil, Trash2, Building2, Users, Send, Mail, ChevronLeft, ChevronRight, LayoutList, CalendarDays, CalendarIcon, BarChart3, ChevronsUpDown, Check, Zap, ChevronDown } from "lucide-react"
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from "recharts"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
@@ -36,7 +37,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { createCampaign, updateCampaign, deleteCampaign, getWeekStats, type IcpStat, type IcpCategoryStat } from "./actions"
+import { createCampaign, updateCampaign, deleteCampaign, getWeekStats, createAutoCampaign, getSavedUrlsForWizard, getDistributionTemplatesForWizard, type IcpStat, type IcpCategoryStat, type AutoCampaignConfig } from "./actions"
 
 function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10)
@@ -77,6 +78,60 @@ type FormData = {
   notes: string
 }
 
+type SavedUrl = { id: string; url: string; label: string | null; url_type: string }
+type DistributionTemplate = { id: string; name: string; industry: string | null }
+
+type AutoForm = {
+  // Step 2 — Company Search
+  company_search_url: string
+  company_count: number
+  exclude_previous: boolean
+  exclusion_date_from: string
+  exclusion_date_to: string
+  start_page: number
+  // Step 3 — People Search
+  people_search_url: string
+  people_count: number
+  // Step 4 — Enrichment
+  enrich_emails: boolean
+  enrich_phones: boolean
+  classify_icp: boolean
+  normalize_names: boolean
+  auto_shortlist: boolean
+  shortlist_icp_min: number
+  shortlist_title_keywords: string
+  // Step 5 — Distribution
+  distribution_template_id: string
+  distribution_template_name: string
+  // Exclusion date range (optional sub-option)
+  filter_by_date_range: boolean
+}
+
+function emptyAutoForm(): AutoForm {
+  const now = new Date()
+  now.setDate(now.getDate() + 1)
+  return {
+    company_search_url: "",
+    company_count: 50,
+    exclude_previous: true,
+    exclusion_date_from: "",
+    exclusion_date_to: "",
+    start_page: 1,
+    people_search_url: "",
+    people_count: 100,
+    enrich_emails: true,
+    enrich_phones: false,
+    classify_icp: true,
+    normalize_names: true,
+    auto_shortlist: true,
+    shortlist_icp_min: 10,
+    shortlist_title_keywords: "",
+    distribution_template_id: "",
+    distribution_template_name: "",
+    filter_by_date_range: false,
+  }
+}
+
 const STATUS_LABELS: Record<CampaignStatus, string> = {
   pending: "Pendiente",
   searching: "Buscando",
@@ -97,6 +152,39 @@ function emptyForm(): FormData {
   return { week_label: formatDate(new Date()), rep_name: "", industry: "", notes: "" }
 }
 
+// ─── Auto Campaign Badge ───────────────────────────────────────────────────────
+
+const AUTO_STATUS_LABELS: Record<string, string> = {
+  pending: "Programada",
+  company_search: "Buscando empresas",
+  creating_list: "Crear lista",
+  people_search: "Buscando personas",
+  enriching: "Enriqueciendo",
+  distributing: "Distribuyendo",
+  done: "Completada",
+  error: "Error",
+}
+
+const AUTO_STATUS_CLASSES: Record<string, string> = {
+  pending: "bg-zinc-100 text-zinc-600 border border-zinc-200",
+  company_search: "bg-blue-50 text-blue-700 border border-blue-200",
+  creating_list: "bg-orange-50 text-orange-700 border border-orange-200",
+  people_search: "bg-blue-50 text-blue-700 border border-blue-200",
+  enriching: "bg-amber-50 text-amber-700 border border-amber-200",
+  distributing: "bg-violet-50 text-violet-700 border border-violet-200",
+  done: "bg-green-50 text-green-700 border border-green-200",
+  error: "bg-red-50 text-red-700 border border-red-200",
+}
+
+function AutoBadge({ status }: { status: string }) {
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${AUTO_STATUS_CLASSES[status] ?? "bg-zinc-100 text-zinc-600"}`}>
+      <Zap className="size-2.5" />
+      {AUTO_STATUS_LABELS[status] ?? status}
+    </span>
+  )
+}
+
 function StatusBadge({ status }: { status: CampaignStatus }) {
   return (
     <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_CLASSES[status]}`}>
@@ -110,11 +198,13 @@ function CampaignTable({
   onEdit,
   onDelete,
   isPending,
+  autoActionMap = {},
 }: {
   campaigns: Campaign[]
   onEdit: (c: Campaign) => void
   onDelete: (id: string) => void
   isPending: boolean
+  autoActionMap?: Record<string, { autoStatus: string; jobUrl: string | null }>
 }) {
   if (campaigns.length === 0) {
     return (
@@ -139,17 +229,38 @@ function CampaignTable({
         </TableRow>
       </TableHeader>
       <TableBody>
-        {campaigns.map((c) => (
+        {campaigns.map((c) => {
+          const autoData = autoActionMap[c.id]
+          const needsAction = (autoData?.autoStatus === "company_search" || autoData?.autoStatus === "creating_list" || autoData?.autoStatus === "people_search") && autoData?.jobUrl
+          const actionLabel = autoData?.autoStatus === "company_search" ? "Company Search"
+            : autoData?.autoStatus === "creating_list" ? "Crear Lista"
+            : "People Search"
+          const actionColor = autoData?.autoStatus === "creating_list"
+            ? "bg-orange-500 hover:bg-orange-600 text-white"
+            : "bg-blue-600 hover:bg-blue-700 text-white"
+          return (
           <TableRow key={c.id}>
             <TableCell className="font-medium whitespace-nowrap">{c.week_label}</TableCell>
             <TableCell>{c.rep_name}</TableCell>
             <TableCell className="max-w-[160px] truncate">{c.industry}</TableCell>
-            <TableCell><StatusBadge status={c.status} /></TableCell>
+            <TableCell>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <StatusBadge status={c.status} />
+                {autoData && <AutoBadge status={autoData.autoStatus} />}
+              </div>
+            </TableCell>
             <TableCell className="text-right tabular-nums">{c.accounts_found}</TableCell>
             <TableCell className="text-right tabular-nums">{c.prospects_found}</TableCell>
             <TableCell className="text-right tabular-nums">{c.prospects_sent}</TableCell>
             <TableCell>
               <div className="flex items-center justify-end gap-1">
+                {needsAction && (
+                  <Button size="sm" className={`h-7 text-xs gap-1 ${actionColor}`}
+                    onClick={() => window.open(autoData.jobUrl!, "_blank", "noreferrer")}>
+                    <Zap className="size-3" />
+                    {actionLabel}
+                  </Button>
+                )}
                 <Button variant="ghost" size="icon" className="size-8" onClick={() => onEdit(c)} disabled={isPending}>
                   <Pencil className="size-3.5" />
                 </Button>
@@ -159,7 +270,8 @@ function CampaignTable({
               </div>
             </TableCell>
           </TableRow>
-        ))}
+          )
+        })}
       </TableBody>
     </Table>
   )
@@ -195,7 +307,7 @@ function formatWeekRange(monday: Date): string {
   return `${start} – ${end}`
 }
 
-function WeeklyView({ campaigns }: { campaigns: Campaign[] }) {
+function WeeklyView({ campaigns, autoActionMap = {} }: { campaigns: Campaign[]; autoActionMap?: Record<string, { autoStatus: string; jobUrl: string | null }> }) {
   const weeks = useMemo(() => {
     const map = new Map<string, { week: number; year: number; monday: Date; campaigns: Campaign[] }>()
     campaigns.forEach((c) => {
@@ -248,24 +360,54 @@ function WeeklyView({ campaigns }: { campaigns: Campaign[] }) {
               <div className="flex-1 border-t" />
             </div>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-              {cams.map((c) => (
-                <Link key={c.id} href={`/campaigns/${c.id}`}>
-                  <div className="rounded-lg border p-3.5 hover:bg-muted/40 transition-colors cursor-pointer h-full">
-                    <div className="flex items-start justify-between gap-2 mb-3">
-                      <div>
-                        <p className="font-medium text-sm">{c.rep_name}</p>
-                        <p className="text-xs text-muted-foreground mt-0.5">{c.industry}</p>
+              {cams.map((c) => {
+                const autoData = autoActionMap[c.id]
+                const needsAction = (autoData?.autoStatus === "company_search" || autoData?.autoStatus === "creating_list" || autoData?.autoStatus === "people_search") && autoData?.jobUrl
+                const weeklyActionLabel = autoData?.autoStatus === "company_search" ? "Abrir Company Search"
+                  : autoData?.autoStatus === "creating_list" ? "Crear Lista de Cuentas"
+                  : "Abrir People Search"
+                const weeklyActionColor = autoData?.autoStatus === "creating_list"
+                  ? "bg-orange-500 hover:bg-orange-600"
+                  : "bg-blue-600 hover:bg-blue-700"
+                return (
+                  <Link key={c.id} href={`/campaigns/${c.id}`}>
+                    <div className="rounded-lg border p-3.5 hover:bg-muted/40 transition-colors cursor-pointer h-full flex flex-col gap-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <p className="font-medium text-sm">{c.rep_name}</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">{c.industry}</p>
+                        </div>
+                        <div className="flex flex-col items-end gap-1">
+                          <StatusBadge status={c.status} />
+                          {autoData && (
+                            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
+                              <Zap className="size-2.5" /> Auto
+                            </span>
+                          )}
+                        </div>
                       </div>
-                      <StatusBadge status={c.status} />
+                      <div className="flex gap-4 text-xs text-muted-foreground">
+                        <span className="flex items-center gap-1"><Building2 className="size-3" />{c.accounts_found}</span>
+                        <span className="flex items-center gap-1"><Users className="size-3" />{c.prospects_found}</span>
+                        <span className="flex items-center gap-1"><Send className="size-3" />{c.prospects_sent}</span>
+                      </div>
+                      {needsAction && (
+                        <button
+                          className={`mt-auto w-full text-xs font-medium py-1.5 px-2 rounded-md ${weeklyActionColor} text-white flex items-center justify-center gap-1.5 transition-colors`}
+                          onClick={(e) => {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            window.open(autoData.jobUrl!, "_blank", "noreferrer")
+                          }}
+                        >
+                          <Zap className="size-3" />
+                          {weeklyActionLabel}
+                        </button>
+                      )}
                     </div>
-                    <div className="flex gap-4 text-xs text-muted-foreground">
-                      <span className="flex items-center gap-1"><Building2 className="size-3" />{c.accounts_found}</span>
-                      <span className="flex items-center gap-1"><Users className="size-3" />{c.prospects_found}</span>
-                      <span className="flex items-center gap-1"><Send className="size-3" />{c.prospects_sent}</span>
-                    </div>
-                  </div>
-                </Link>
-              ))}
+                  </Link>
+                )
+              })}
             </div>
           </div>
         )
@@ -616,7 +758,7 @@ function ChartsView({ campaigns, icpStats, icpCategoryStats }: { campaigns: Camp
   )
 }
 
-export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats }: { initialCampaigns: Campaign[]; icpStats: IcpStat[]; icpCategoryStats: IcpCategoryStat[] }) {
+export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats, campaignIndustries = [], autoActionMap = {} }: { initialCampaigns: Campaign[]; icpStats: IcpStat[]; icpCategoryStats: IcpCategoryStat[]; campaignIndustries?: string[]; autoActionMap?: Record<string, { autoStatus: string; jobUrl: string | null }> }) {
   const [campaigns, setCampaigns] = useState<Campaign[]>(initialCampaigns)
   const [view, setView] = useState<"week" | "list" | "charts">("week")
   const [selectedWeek, setSelectedWeek] = useState(() => getWeekMonday(new Date()))
@@ -629,6 +771,30 @@ export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats }
   const [industryOpen, setIndustryOpen] = useState(false)
   const [isPending, startTransition] = useTransition()
   const searchRef = useRef<HTMLInputElement>(null)
+  const router = useRouter()
+
+  // Auto-refresh when there are active auto campaigns
+  const activeAutoStatuses = ["pending", "company_search", "creating_list", "people_search", "enriching", "distributing"]
+  const hasActiveAuto = Object.values(autoActionMap).some((a) => activeAutoStatuses.includes(a.autoStatus))
+  useEffect(() => {
+    if (!hasActiveAuto) return
+    const interval = setInterval(() => router.refresh(), 10000)
+    return () => clearInterval(interval)
+  }, [hasActiveAuto, router])
+
+  // Auto campaign wizard state
+  const [campaignMode, setCampaignMode] = useState<"manual" | "auto">("manual")
+  const [autoStep, setAutoStep] = useState(1)
+  const [autoForm, setAutoForm] = useState<AutoForm>(emptyAutoForm())
+  const [savedUrls, setSavedUrls] = useState<SavedUrl[]>([])
+  const [distTemplates, setDistTemplates] = useState<DistributionTemplate[]>([])
+  const [csUrlOpen, setCsUrlOpen] = useState(false)
+  const [psUrlOpen, setPsUrlOpen] = useState(false)
+
+  const allIndustries = useMemo(() => {
+    const merged = new Set([...INDUSTRIES, ...campaignIndustries])
+    return [...merged].sort()
+  }, [campaignIndustries])
 
   const weekCampaigns = useMemo(() => {
     const weekKey = getISOWeekInfo(new Date(selectedWeek + "T12:00:00")).key
@@ -659,13 +825,29 @@ export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats }
   function openCreate() {
     setEditingId(null)
     setForm(emptyForm())
+    setCampaignMode("manual")
+    setAutoStep(1)
+    setAutoForm(emptyAutoForm())
+    setSavedUrls([])
+    setDistTemplates([])
     setDialogOpen(true)
   }
 
   function openEdit(c: Campaign) {
     setEditingId(c.id)
+    setCampaignMode("manual")
     setForm({ week_label: c.week_label, rep_name: c.rep_name, industry: c.industry, notes: c.notes ?? "" })
     setDialogOpen(true)
+  }
+
+  async function loadWizardData(repName: string, industry: string) {
+    if (!repName || !industry) return
+    const [urls, templates] = await Promise.all([
+      getSavedUrlsForWizard(repName, industry),
+      getDistributionTemplatesForWizard(),
+    ])
+    setSavedUrls(urls)
+    setDistTemplates(templates)
   }
 
   function handleSave() {
@@ -686,6 +868,44 @@ export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats }
         }
         setCampaigns((prev) => [newCampaign, ...prev])
       }
+      setDialogOpen(false)
+    })
+  }
+
+  function handleSaveAuto() {
+    if (!form.rep_name || !form.industry || !form.week_label) return
+    if (!autoForm.company_search_url || !autoForm.people_search_url) return
+    startTransition(async () => {
+      const scheduledAt = new Date().toISOString()
+      const config: AutoCampaignConfig = {
+        company_search_url: autoForm.company_search_url,
+        company_count: autoForm.company_count,
+        exclude_previous: autoForm.exclude_previous,
+        exclusion_date_from: autoForm.exclusion_date_from || null,
+        exclusion_date_to: autoForm.exclusion_date_to || null,
+        start_page: autoForm.start_page,
+        people_search_url: autoForm.people_search_url,
+        people_count: autoForm.people_count,
+        enrich_emails: autoForm.enrich_emails,
+        enrich_phones: autoForm.enrich_phones,
+        classify_icp: autoForm.classify_icp,
+        normalize_names: autoForm.normalize_names,
+        shortlist_icp_min: autoForm.auto_shortlist ? autoForm.shortlist_icp_min : null,
+        shortlist_title_keywords: autoForm.auto_shortlist ? autoForm.shortlist_title_keywords || null : null,
+        distribution_template_id: autoForm.distribution_template_id || null,
+        distribution_template_name: autoForm.distribution_template_name || null,
+        scheduled_at: scheduledAt,
+      }
+      const newId = await createAutoCampaign(form, config)
+      const newCampaign: Campaign = {
+        id: newId,
+        ...form,
+        status: "pending",
+        accounts_found: 0,
+        prospects_found: 0,
+        prospects_sent: 0,
+      }
+      setCampaigns((prev) => [newCampaign, ...prev])
       setDialogOpen(false)
     })
   }
@@ -809,7 +1029,7 @@ export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats }
         </Card>
       </div>
 
-      {view === "week" && <WeeklyView campaigns={weekCampaigns} />}
+      {view === "week" && <WeeklyView campaigns={weekCampaigns} autoActionMap={autoActionMap} />}
       {view === "charts" && <ChartsView campaigns={campaigns} icpStats={icpStats} icpCategoryStats={icpCategoryStats} />}
 
       {view === "list" && <Tabs defaultValue="Todos">
@@ -822,106 +1042,441 @@ export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats }
           const tab = r === "Todos" ? campaigns : campaigns.filter((c) => c.rep_name === r)
           return (
             <TabsContent key={r} value={r} className="mt-3">
-              <CampaignTable campaigns={tab} onEdit={openEdit} onDelete={handleDelete} isPending={isPending} />
+              <CampaignTable campaigns={tab} onEdit={openEdit} onDelete={handleDelete} isPending={isPending} autoActionMap={autoActionMap} />
             </TabsContent>
           )
         })}
       </Tabs>}
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className={campaignMode === "auto" && !editingId ? "sm:max-w-2xl" : "sm:max-w-md"}>
           <DialogHeader>
             <DialogTitle>{editingId ? "Editar campaña" : "Nueva campaña"}</DialogTitle>
           </DialogHeader>
+
+          {/* Mode toggle — only on create */}
+          {!editingId && (
+            <div className="flex rounded-md border w-fit">
+              <button
+                type="button"
+                onClick={() => { setCampaignMode("manual"); setAutoStep(1) }}
+                className={`px-3 py-1.5 rounded-l-md text-sm transition-colors ${campaignMode === "manual" ? "bg-foreground text-background" : "hover:bg-muted/50"}`}
+              >
+                Manual
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setCampaignMode("auto")
+                  setAutoStep(1)
+                  if (form.rep_name && form.industry) loadWizardData(form.rep_name, form.industry)
+                }}
+                className={`px-3 py-1.5 rounded-r-md border-l text-sm flex items-center gap-1.5 transition-colors ${campaignMode === "auto" ? "bg-foreground text-background" : "hover:bg-muted/50"}`}
+              >
+                <Zap className="size-3.5" />
+                Automática
+              </button>
+            </div>
+          )}
+
+          {/* ── Step 1 / Campaign info — shared between both modes ── */}
           <div className="space-y-4 py-2">
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">Fecha</label>
-              <Popover open={calOpen} onOpenChange={setCalOpen}>
-                <PopoverTrigger className="flex h-9 w-full items-center justify-start rounded-md border border-input bg-background px-3 text-sm font-normal hover:bg-accent hover:text-accent-foreground">
-                  <CalendarIcon className="mr-2 size-4 text-muted-foreground" />
-                  {form.week_label || "Seleccionar fecha"}
-                </PopoverTrigger>
-                <PopoverContent className="w-auto p-0" align="start">
-                  <Calendar
-                    mode="single"
-                    selected={form.week_label ? new Date(form.week_label + "T12:00:00") : undefined}
-                    onSelect={(d) => {
-                      if (d) {
-                        const monday = new Date(d)
-                        monday.setDate(d.getDate() - (d.getDay() || 7) + 1)
-                        setForm((f) => ({ ...f, week_label: formatDate(monday) }))
-                        setCalOpen(false)
-                      }
+            {campaignMode === "auto" && !editingId && (
+              <div className="flex items-center gap-2 mb-1">
+                {[1, 2, 3, 4, 5].map((s) => (
+                  <div key={s} className="flex items-center gap-1">
+                    <div className={`size-6 rounded-full flex items-center justify-center text-xs font-medium transition-colors ${autoStep === s ? "bg-primary text-primary-foreground" : autoStep > s ? "bg-green-100 text-green-700" : "bg-muted text-muted-foreground"}`}>
+                      {autoStep > s ? <Check className="size-3" /> : s}
+                    </div>
+                    {s < 5 && <div className={`h-px w-4 ${autoStep > s ? "bg-green-300" : "bg-muted"}`} />}
+                  </div>
+                ))}
+                <span className="ml-2 text-xs text-muted-foreground">
+                  {["Campaña", "Company Search", "People Search", "Enrichment", "Horario"][autoStep - 1]}
+                </span>
+              </div>
+            )}
+
+            {/* Step 1: Campaign data */}
+            {(campaignMode === "manual" || autoStep === 1) && (
+              <>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Fecha</label>
+                  <Popover open={calOpen} onOpenChange={setCalOpen}>
+                    <PopoverTrigger className="flex h-9 w-full items-center justify-start rounded-md border border-input bg-background px-3 text-sm font-normal hover:bg-accent hover:text-accent-foreground">
+                      <CalendarIcon className="mr-2 size-4 text-muted-foreground" />
+                      {form.week_label || "Seleccionar fecha"}
+                    </PopoverTrigger>
+                    <PopoverContent className="w-auto p-0" align="start">
+                      <Calendar
+                        mode="single"
+                        selected={form.week_label ? new Date(form.week_label + "T12:00:00") : undefined}
+                        onSelect={(d) => {
+                          if (d) {
+                            const monday = new Date(d)
+                            monday.setDate(d.getDate() - (d.getDay() || 7) + 1)
+                            setForm((f) => ({ ...f, week_label: formatDate(monday) }))
+                            setCalOpen(false)
+                          }
+                        }}
+                      />
+                    </PopoverContent>
+                  </Popover>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Rep</label>
+                  <Select
+                    value={form.rep_name}
+                    onValueChange={(v) => {
+                      setForm((f) => ({ ...f, rep_name: v ?? "" }))
+                      const industry = form.industry
+                      if (campaignMode === "auto" && v && industry) loadWizardData(v, industry)
                     }}
+                  >
+                    <SelectTrigger><SelectValue placeholder="Seleccionar rep" /></SelectTrigger>
+                    <SelectContent>
+                      {REP_OPTIONS.map((r) => <SelectItem key={r} value={r}>{r}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Industria</label>
+                  <Popover open={industryOpen} onOpenChange={setIndustryOpen}>
+                    <PopoverTrigger className="flex h-9 w-full items-center justify-between rounded-md border border-input bg-background px-3 text-sm font-normal hover:bg-accent hover:text-accent-foreground">
+                      <span className={form.industry ? "" : "text-muted-foreground"}>
+                        {form.industry || "Seleccionar o escribir industria…"}
+                      </span>
+                      <ChevronsUpDown className="size-4 text-muted-foreground" />
+                    </PopoverTrigger>
+                    <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0" align="start">
+                      <Command>
+                        <CommandInput
+                          placeholder="Buscar o escribir nueva…"
+                          value={form.industry}
+                          onValueChange={(v) => setForm((f) => ({ ...f, industry: v }))}
+                        />
+                        <CommandList>
+                          <CommandEmpty>
+                            <button
+                              className="w-full px-3 py-2 text-left text-sm hover:bg-muted/50"
+                              onClick={() => setIndustryOpen(false)}
+                            >
+                              Usar &quot;{form.industry}&quot;
+                            </button>
+                          </CommandEmpty>
+                          <CommandGroup>
+                            {allIndustries.map((i) => (
+                              <CommandItem
+                                key={i}
+                                value={i}
+                                onSelect={() => {
+                                  setForm((f) => ({ ...f, industry: i }))
+                                  setIndustryOpen(false)
+                                  if (campaignMode === "auto" && form.rep_name) loadWizardData(form.rep_name, i)
+                                }}
+                              >
+                                <Check className={`mr-2 size-4 ${form.industry === i ? "opacity-100" : "opacity-0"}`} />
+                                {i}
+                              </CommandItem>
+                            ))}
+                          </CommandGroup>
+                        </CommandList>
+                      </Command>
+                    </PopoverContent>
+                  </Popover>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-muted-foreground">Notas (opcional)</label>
+                  <Input
+                    value={form.notes}
+                    onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
+                    placeholder="Notas..."
                   />
-                </PopoverContent>
-              </Popover>
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">Rep</label>
-              <Select value={form.rep_name} onValueChange={(v) => setForm((f) => ({ ...f, rep_name: v ?? "" }))}>
-                <SelectTrigger><SelectValue placeholder="Seleccionar rep" /></SelectTrigger>
-                <SelectContent>
-                  {REP_OPTIONS.map((r) => <SelectItem key={r} value={r}>{r}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">Industria</label>
-              <Popover open={industryOpen} onOpenChange={setIndustryOpen}>
-                <PopoverTrigger className="flex h-9 w-full items-center justify-between rounded-md border border-input bg-background px-3 text-sm font-normal hover:bg-accent hover:text-accent-foreground">
-                  <span className={form.industry ? "" : "text-muted-foreground"}>
-                    {form.industry || "Seleccionar o escribir industria…"}
-                  </span>
-                  <ChevronsUpDown className="size-4 text-muted-foreground" />
-                </PopoverTrigger>
-                <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0" align="start">
-                  <Command>
-                    <CommandInput
-                      placeholder="Buscar o escribir nueva…"
-                      value={form.industry}
-                      onValueChange={(v) => setForm((f) => ({ ...f, industry: v }))}
+                </div>
+              </>
+            )}
+
+            {/* Step 2: Company Search */}
+            {campaignMode === "auto" && autoStep === 2 && (
+              <div className="space-y-4">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium">URL de Sales Nav (Company Search)</label>
+                    {savedUrls.filter((u) => u.url_type === "company_search").length > 0 && (
+                      <Popover open={csUrlOpen} onOpenChange={setCsUrlOpen}>
+                        <PopoverTrigger className="inline-flex items-center gap-1 h-7 px-2 rounded-md border border-input bg-background text-xs font-medium hover:bg-accent hover:text-accent-foreground">
+                          URLs guardadas <ChevronDown className="size-3" />
+                        </PopoverTrigger>
+                        <PopoverContent className="w-80 p-2" align="end">
+                          <div className="space-y-1">
+                            {savedUrls.filter((u) => u.url_type === "company_search").map((u) => (
+                              <button
+                                key={u.id}
+                                className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-muted/50 truncate"
+                                onClick={() => {
+                                  setAutoForm((f) => ({ ...f, company_search_url: u.url }))
+                                  setCsUrlOpen(false)
+                                }}
+                              >
+                                {u.label || u.url.slice(0, 60) + "…"}
+                              </button>
+                            ))}
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                    )}
+                  </div>
+                  <textarea
+                    className="w-full min-h-[80px] rounded-md border border-input bg-background px-3 py-2 text-sm resize-none focus:outline-none focus:ring-1 focus:ring-ring"
+                    placeholder="https://www.linkedin.com/sales/search/company?..."
+                    value={autoForm.company_search_url}
+                    onChange={(e) => setAutoForm((f) => ({ ...f, company_search_url: e.target.value }))}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium">Empresas a scrapear</label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={500}
+                      value={autoForm.company_count}
+                      onChange={(e) => setAutoForm((f) => ({ ...f, company_count: parseInt(e.target.value) || 50 }))}
                     />
-                    <CommandList>
-                      <CommandEmpty>
-                        <button
-                          className="w-full px-3 py-2 text-left text-sm hover:bg-muted/50"
-                          onClick={() => setIndustryOpen(false)}
-                        >
-                          Usar &quot;{form.industry}&quot;
-                        </button>
-                      </CommandEmpty>
-                      <CommandGroup>
-                        {INDUSTRIES.map((i) => (
-                          <CommandItem
-                            key={i}
-                            value={i}
-                            onSelect={() => { setForm((f) => ({ ...f, industry: i })); setIndustryOpen(false) }}
-                          >
-                            <Check className={`mr-2 size-4 ${form.industry === i ? "opacity-100" : "opacity-0"}`} />
-                            {i}
-                          </CommandItem>
-                        ))}
-                      </CommandGroup>
-                    </CommandList>
-                  </Command>
-                </PopoverContent>
-              </Popover>
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium text-muted-foreground">Notas (opcional)</label>
-              <Input
-                value={form.notes}
-                onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
-                placeholder="Notas..."
-              />
-            </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium">Página de inicio</label>
+                    <Input
+                      type="number"
+                      min={1}
+                      value={autoForm.start_page}
+                      onChange={(e) => setAutoForm((f) => ({ ...f, start_page: parseInt(e.target.value) || 1 }))}
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      id="exclude_previous"
+                      checked={autoForm.exclude_previous}
+                      onChange={(e) => setAutoForm((f) => ({ ...f, exclude_previous: e.target.checked }))}
+                      className="size-4"
+                    />
+                    <label htmlFor="exclude_previous" className="text-sm font-medium">Excluir listas de semanas anteriores</label>
+                  </div>
+                  {autoForm.exclude_previous && (
+                    <div className="space-y-2 pl-6">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          id="filter_by_date_range"
+                          checked={autoForm.filter_by_date_range}
+                          onChange={(e) => setAutoForm((f) => ({ ...f, filter_by_date_range: e.target.checked, exclusion_date_from: "", exclusion_date_to: "" }))}
+                          className="size-4"
+                        />
+                        <label htmlFor="filter_by_date_range" className="text-sm text-muted-foreground">Filtrar por rango de fechas</label>
+                      </div>
+                      {autoForm.filter_by_date_range && (
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="space-y-1">
+                            <label className="text-xs text-muted-foreground">Desde</label>
+                            <Input type="date" value={autoForm.exclusion_date_from} onChange={(e) => setAutoForm((f) => ({ ...f, exclusion_date_from: e.target.value }))} className="h-8 text-sm" />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs text-muted-foreground">Hasta</label>
+                            <Input type="date" value={autoForm.exclusion_date_to} onChange={(e) => setAutoForm((f) => ({ ...f, exclusion_date_to: e.target.value }))} className="h-8 text-sm" />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Step 3: People Search */}
+            {campaignMode === "auto" && autoStep === 3 && (
+              <div className="space-y-4">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium">URL de Sales Nav (People Search)</label>
+                    {savedUrls.filter((u) => u.url_type === "people_search").length > 0 && (
+                      <Popover open={psUrlOpen} onOpenChange={setPsUrlOpen}>
+                        <PopoverTrigger className="inline-flex items-center gap-1 h-7 px-2 rounded-md border border-input bg-background text-xs font-medium hover:bg-accent hover:text-accent-foreground">
+                          URLs guardadas <ChevronDown className="size-3" />
+                        </PopoverTrigger>
+                        <PopoverContent className="w-80 p-2" align="end">
+                          <div className="space-y-1">
+                            {savedUrls.filter((u) => u.url_type === "people_search").map((u) => (
+                              <button
+                                key={u.id}
+                                className="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-muted/50 truncate"
+                                onClick={() => {
+                                  setAutoForm((f) => ({ ...f, people_search_url: u.url }))
+                                  setPsUrlOpen(false)
+                                }}
+                              >
+                                {u.label || u.url.slice(0, 60) + "…"}
+                              </button>
+                            ))}
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                    )}
+                  </div>
+                  <textarea
+                    className="w-full min-h-[80px] rounded-md border border-input bg-background px-3 py-2 text-sm resize-none focus:outline-none focus:ring-1 focus:ring-ring"
+                    placeholder="https://www.linkedin.com/sales/search/people?..."
+                    value={autoForm.people_search_url}
+                    onChange={(e) => setAutoForm((f) => ({ ...f, people_search_url: e.target.value }))}
+                  />
+                  <p className="text-xs text-muted-foreground">El Account List de las empresas scrapeadas se inyecta automáticamente en esta URL al correr.</p>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Personas a scrapear</label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={1000}
+                    value={autoForm.people_count}
+                    onChange={(e) => setAutoForm((f) => ({ ...f, people_count: parseInt(e.target.value) || 100 }))}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Step 4: Enrichment */}
+            {campaignMode === "auto" && autoStep === 4 && (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-3">
+                  {[
+                    { key: "enrich_emails", label: "Buscar emails" },
+                    { key: "enrich_phones", label: "Buscar teléfonos" },
+                    { key: "classify_icp", label: "Clasificar ICP" },
+                    { key: "normalize_names", label: "Normalizar nombres" },
+                  ].map(({ key, label }) => (
+                    <div key={key} className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        id={key}
+                        checked={autoForm[key as keyof AutoForm] as boolean}
+                        onChange={(e) => setAutoForm((f) => ({ ...f, [key]: e.target.checked }))}
+                        className="size-4"
+                      />
+                      <label htmlFor={key} className="text-sm">{label}</label>
+                    </div>
+                  ))}
+                </div>
+                <div className="space-y-3 pt-1 border-t">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      id="auto_shortlist"
+                      checked={autoForm.auto_shortlist}
+                      onChange={(e) => setAutoForm((f) => ({ ...f, auto_shortlist: e.target.checked }))}
+                      className="size-4"
+                    />
+                    <label htmlFor="auto_shortlist" className="text-sm font-medium">Auto-shortlist</label>
+                  </div>
+                  {autoForm.auto_shortlist && (
+                    <div className="space-y-3 pl-6">
+                      <div className="space-y-1.5">
+                        <label className="text-sm font-medium">ICP score mínimo</label>
+                        <Input
+                          type="number"
+                          min={0}
+                          max={10}
+                          value={autoForm.shortlist_icp_min}
+                          onChange={(e) => setAutoForm((f) => ({ ...f, shortlist_icp_min: parseInt(e.target.value) ?? 10 }))}
+                        />
+                        <p className="text-xs text-muted-foreground">Personas con score ≥ este valor pasan directo a Shortlist</p>
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-sm font-medium">Cargos para shortlist (opcional)</label>
+                        <Input
+                          placeholder="CEO, Founder, Director, VP…"
+                          value={autoForm.shortlist_title_keywords}
+                          onChange={(e) => setAutoForm((f) => ({ ...f, shortlist_title_keywords: e.target.value }))}
+                        />
+                        <p className="text-xs text-muted-foreground">Comma-separado, case-insensitive</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Step 5: Distribution */}
+            {campaignMode === "auto" && autoStep === 5 && (
+              <div className="space-y-4">
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Template de distribución</label>
+                  <Select
+                    value={autoForm.distribution_template_id}
+                    onValueChange={(v) => {
+                      const tmpl = distTemplates.find((t) => t.id === v)
+                      setAutoForm((f) => ({ ...f, distribution_template_id: v ?? "", distribution_template_name: tmpl?.name ?? "" }))
+                    }}
+                  >
+                    <SelectTrigger><SelectValue placeholder="Sin distribución automática" /></SelectTrigger>
+                    <SelectContent>
+                      {distTemplates.map((t) => (
+                        <SelectItem key={t.id} value={t.id}>{t.name}{t.industry ? ` — ${t.industry}` : ""}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">Opcional — si no elegís template, el pipeline termina en enrichment</p>
+                </div>
+                {/* Summary */}
+                <div className="rounded-md bg-muted/40 p-3 space-y-1.5 text-sm">
+                  <p className="font-medium text-xs uppercase tracking-wide text-muted-foreground mb-2">Resumen</p>
+                  <p><span className="text-muted-foreground">Campaña:</span> {form.rep_name} · {form.industry} · {form.week_label}</p>
+                  <p><span className="text-muted-foreground">Company Search:</span> {autoForm.company_count} empresas{autoForm.exclude_previous ? " · excluye listas anteriores" : ""}</p>
+                  <p><span className="text-muted-foreground">People Search:</span> {autoForm.people_count} personas</p>
+                  <p><span className="text-muted-foreground">Enrichment:</span> {[autoForm.enrich_emails && "emails", autoForm.enrich_phones && "teléfonos", autoForm.classify_icp && "ICP", autoForm.normalize_names && "normalización"].filter(Boolean).join(", ")}</p>
+                  <p><span className="text-muted-foreground">Shortlist:</span> {autoForm.auto_shortlist ? `ICP ≥ ${autoForm.shortlist_icp_min}${autoForm.shortlist_title_keywords ? ` + "${autoForm.shortlist_title_keywords}"` : ""}` : "desactivado"}</p>
+                  <p><span className="text-muted-foreground">Distribución:</span> {autoForm.distribution_template_name || "ninguna"}</p>
+                  <p className="text-xs text-muted-foreground pt-1">La campaña arranca en los próximos minutos automáticamente.</p>
+                </div>
+              </div>
+            )}
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancelar</Button>
-            <Button onClick={handleSave} disabled={isPending || !form.rep_name || !form.industry || !form.week_label}>
-              {isPending ? "Guardando..." : editingId ? "Guardar cambios" : "Crear campaña"}
-            </Button>
+
+          <DialogFooter className="flex-row gap-2 justify-between sm:justify-between">
+            {campaignMode === "auto" && !editingId && autoStep > 1 ? (
+              <Button variant="outline" onClick={() => setAutoStep((s) => s - 1)}>Atrás</Button>
+            ) : (
+              <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancelar</Button>
+            )}
+            {campaignMode === "manual" || editingId ? (
+              <Button onClick={handleSave} disabled={isPending || !form.rep_name || !form.industry || !form.week_label}>
+                {isPending ? "Guardando..." : editingId ? "Guardar cambios" : "Crear campaña"}
+              </Button>
+            ) : autoStep < 5 ? (
+              <Button
+                onClick={() => {
+                  if (autoStep === 1 && form.rep_name && form.industry) {
+                    loadWizardData(form.rep_name, form.industry)
+                  }
+                  setAutoStep((s) => s + 1)
+                }}
+                disabled={
+                  (autoStep === 1 && (!form.rep_name || !form.industry || !form.week_label)) ||
+                  (autoStep === 2 && !autoForm.company_search_url) ||
+                  (autoStep === 3 && !autoForm.people_search_url)
+                }
+              >
+                Siguiente
+              </Button>
+            ) : (
+              <Button
+                onClick={handleSaveAuto}
+                disabled={isPending}
+              >
+                {isPending ? "Creando..." : "Crear campaña automática"}
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
