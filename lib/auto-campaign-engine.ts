@@ -434,6 +434,21 @@ async function advanceEnriching(auto: AutoCampaign) {
 }
 
 async function finalizeEnrichment(auto: AutoCampaign, totalCount: number) {
+  // Assign campaign industry to accounts that don't have one yet
+  const { data: campaign } = await supabaseAdmin
+    .from("campaigns")
+    .select("industry")
+    .eq("id", auto.campaign_id)
+    .single()
+
+  if (campaign?.industry) {
+    await supabaseAdmin
+      .from("accounts")
+      .update({ industry: campaign.industry })
+      .eq("campaign_id", auto.campaign_id)
+      .is("industry", null)
+  }
+
   // Apply auto-shortlist rules
   const shortlistIds: string[] = []
 
