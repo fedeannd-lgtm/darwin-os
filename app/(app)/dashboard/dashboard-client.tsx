@@ -899,9 +899,10 @@ export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats, 
           distribution_template_name: autoForm.distribution_template_name || null,
           scheduled_at: scheduledAt,
         }
-        const newId = await createAutoCampaign(form, config)
+        const result = await createAutoCampaign(form, config)
+        if ("error" in result) { setAutoError(result.error); return }
         const newCampaign: Campaign = {
-          id: newId,
+          id: result.id,
           ...form,
           status: "pending",
           accounts_found: 0,
@@ -911,7 +912,7 @@ export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats, 
         setCampaigns((prev) => [newCampaign, ...prev])
         setDialogOpen(false)
       } catch (err) {
-        setAutoError(err instanceof Error ? err.message : "Error al crear campaña automática")
+        setAutoError(err instanceof Error ? err.message : String(err))
       }
     })
   }

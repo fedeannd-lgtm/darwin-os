@@ -168,7 +168,7 @@ export type AutoCampaign = {
 export async function createAutoCampaign(
   campaignData: { week_label: string; rep_name: string; industry: string; notes: string },
   autoConfig: AutoCampaignConfig
-) {
+): Promise<{ id: string } | { error: string }> {
   // Create campaign first
   const { data: campaign, error: campErr } = await supabaseAdmin
     .from("campaigns")
@@ -176,7 +176,7 @@ export async function createAutoCampaign(
     .select("id")
     .single()
 
-  if (campErr || !campaign) throw new Error(campErr?.message ?? "Error al crear campaña")
+  if (campErr || !campaign) return { error: `campaigns.insert: ${campErr?.message ?? "sin data"}` }
 
   // Create auto_campaign config linked to it
   const { error: autoErr } = await supabaseAdmin.from("auto_campaigns").insert({
@@ -187,7 +187,7 @@ export async function createAutoCampaign(
   if (autoErr) {
     // Rollback campaign creation
     await supabaseAdmin.from("campaigns").delete().eq("id", campaign.id)
-    throw new Error(autoErr.message)
+    return { error: `auto_campaigns.insert: ${autoErr.message}` }
   }
 
   // Advance immediately so the company_search job is created before the page reloads
@@ -199,7 +199,7 @@ export async function createAutoCampaign(
   }
 
   revalidatePath("/dashboard")
-  return campaign.id
+  return { id: campaign.id }
 }
 
 export async function getAutoCampaignForCampaign(campaignId: string): Promise<AutoCampaign | null> {
