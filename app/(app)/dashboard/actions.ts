@@ -190,12 +190,18 @@ export async function createAutoCampaign(
     return { error: `auto_campaigns.insert: ${autoErr.message}` }
   }
 
-  // Advance immediately so the company_search job is created before the page reloads
-  try {
-    const { advanceAutoCampaigns } = await import("@/lib/auto-campaign-engine")
-    await advanceAutoCampaigns()
-  } catch (err) {
-    console.error("[createAutoCampaign] Error advancing:", err)
+  // Advance immediately — llamamos advancePending directo con los datos que ya tenemos
+  // para evitar el race condition de la query por pending campaigns
+  const { advancePending } = await import("@/lib/auto-campaign-engine")
+  const { data: autoRow } = await supabaseAdmin
+    .from("auto_campaigns")
+    .select("*")
+    .eq("campaign_id", campaign.id)
+    .single()
+  if (autoRow) {
+    await advancePending(autoRow).catch((err) =>
+      console.error("[createAutoCampaign] Error advancing:", err)
+    )
   }
 
   revalidatePath("/dashboard")

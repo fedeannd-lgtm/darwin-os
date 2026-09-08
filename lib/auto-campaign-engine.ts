@@ -67,7 +67,7 @@ async function setStatus(id: string, status: string, extra: Record<string, unkno
 
 // ─── Step 1: pending → company_search ────────────────────────────────────────
 
-async function advancePending(auto: AutoCampaign) {
+export async function advancePending(auto: AutoCampaign) {
   // Build extension URL with optional exclusion lists
   let urlToOpen = auto.company_search_url
   if ((auto.start_page ?? 1) > 1) {
