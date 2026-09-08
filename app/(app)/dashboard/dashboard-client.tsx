@@ -788,6 +788,7 @@ export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats, 
   const [autoForm, setAutoForm] = useState<AutoForm>(emptyAutoForm())
   const [savedUrls, setSavedUrls] = useState<SavedUrl[]>([])
   const [distTemplates, setDistTemplates] = useState<DistributionTemplate[]>([])
+  const [autoError, setAutoError] = useState<string | null>(null)
   const [csUrlOpen, setCsUrlOpen] = useState(false)
   const [psUrlOpen, setPsUrlOpen] = useState(false)
 
@@ -875,38 +876,43 @@ export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats, 
   function handleSaveAuto() {
     if (!form.rep_name || !form.industry || !form.week_label) return
     if (!autoForm.company_search_url || !autoForm.people_search_url) return
+    setAutoError(null)
     startTransition(async () => {
-      const scheduledAt = new Date().toISOString()
-      const config: AutoCampaignConfig = {
-        company_search_url: autoForm.company_search_url,
-        company_count: autoForm.company_count,
-        exclude_previous: autoForm.exclude_previous,
-        exclusion_date_from: autoForm.exclusion_date_from || null,
-        exclusion_date_to: autoForm.exclusion_date_to || null,
-        start_page: autoForm.start_page,
-        people_search_url: autoForm.people_search_url,
-        people_count: autoForm.people_count,
-        enrich_emails: autoForm.enrich_emails,
-        enrich_phones: autoForm.enrich_phones,
-        classify_icp: autoForm.classify_icp,
-        normalize_names: autoForm.normalize_names,
-        shortlist_icp_min: autoForm.auto_shortlist ? autoForm.shortlist_icp_min : null,
-        shortlist_title_keywords: autoForm.auto_shortlist ? autoForm.shortlist_title_keywords || null : null,
-        distribution_template_id: autoForm.distribution_template_id || null,
-        distribution_template_name: autoForm.distribution_template_name || null,
-        scheduled_at: scheduledAt,
+      try {
+        const scheduledAt = new Date().toISOString()
+        const config: AutoCampaignConfig = {
+          company_search_url: autoForm.company_search_url,
+          company_count: autoForm.company_count,
+          exclude_previous: autoForm.exclude_previous,
+          exclusion_date_from: autoForm.exclusion_date_from || null,
+          exclusion_date_to: autoForm.exclusion_date_to || null,
+          start_page: autoForm.start_page,
+          people_search_url: autoForm.people_search_url,
+          people_count: autoForm.people_count,
+          enrich_emails: autoForm.enrich_emails,
+          enrich_phones: autoForm.enrich_phones,
+          classify_icp: autoForm.classify_icp,
+          normalize_names: autoForm.normalize_names,
+          shortlist_icp_min: autoForm.auto_shortlist ? autoForm.shortlist_icp_min : null,
+          shortlist_title_keywords: autoForm.auto_shortlist ? autoForm.shortlist_title_keywords || null : null,
+          distribution_template_id: autoForm.distribution_template_id || null,
+          distribution_template_name: autoForm.distribution_template_name || null,
+          scheduled_at: scheduledAt,
+        }
+        const newId = await createAutoCampaign(form, config)
+        const newCampaign: Campaign = {
+          id: newId,
+          ...form,
+          status: "pending",
+          accounts_found: 0,
+          prospects_found: 0,
+          prospects_sent: 0,
+        }
+        setCampaigns((prev) => [newCampaign, ...prev])
+        setDialogOpen(false)
+      } catch (err) {
+        setAutoError(err instanceof Error ? err.message : "Error al crear campaña automática")
       }
-      const newId = await createAutoCampaign(form, config)
-      const newCampaign: Campaign = {
-        id: newId,
-        ...form,
-        status: "pending",
-        accounts_found: 0,
-        prospects_found: 0,
-        prospects_sent: 0,
-      }
-      setCampaigns((prev) => [newCampaign, ...prev])
-      setDialogOpen(false)
     })
   }
 
@@ -1479,6 +1485,11 @@ export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats, 
               </Button>
             )}
           </DialogFooter>
+          {autoError && (
+            <div className="px-6 pb-4 text-sm text-red-500 bg-red-50 dark:bg-red-950/20 rounded-b-lg">
+              Error: {autoError}
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

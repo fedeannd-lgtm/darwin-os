@@ -191,10 +191,12 @@ export async function createAutoCampaign(
   }
 
   // Advance immediately so the company_search job is created before the page reloads
-  const { advanceAutoCampaigns } = await import("@/lib/auto-campaign-engine")
-  await advanceAutoCampaigns().catch((err) =>
+  try {
+    const { advanceAutoCampaigns } = await import("@/lib/auto-campaign-engine")
+    await advanceAutoCampaigns()
+  } catch (err) {
     console.error("[createAutoCampaign] Error advancing:", err)
-  )
+  }
 
   revalidatePath("/dashboard")
   return campaign.id
