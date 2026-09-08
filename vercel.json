@@ -1,1 +1,8 @@
-{}
+{
+  "crons": [
+    {
+      "path": "/api/cron/trigger-extraction",
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}
