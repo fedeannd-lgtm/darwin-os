@@ -1,5 +1,6 @@
 import { supabaseAdmin } from "@/lib/supabase"
 import { advanceSearchPage } from "@/app/(app)/company-search/actions"
+import { apolloOrgLookup } from "@/lib/apollo"
 
 export type RawCompany = {
   companyName?: string
@@ -109,6 +110,22 @@ export async function processCompanySearch(
   }))
 
   if (accounts.length > 0) await supabaseAdmin.from("accounts").insert(accounts)
+
+  // Fallback: for accounts without domain, try Apollo org search (no lead credits consumed)
+  const noDomain = accounts.filter((a) => !a.domain && a.company_name)
+  if (noDomain.length > 0 && process.env.APOLLO_API_KEY) {
+    for (const co of noDomain) {
+      const domain = await apolloOrgLookup(co.company_name)
+      if (domain) {
+        await supabaseAdmin
+          .from("accounts")
+          .update({ domain })
+          .eq("campaign_id", co.campaign_id)
+          .eq("sales_nav_id", co.sales_nav_id)
+        console.log(`[processCompanySearch] Apollo domain fallback: ${co.company_name} → ${domain}`)
+      }
+    }
+  }
 
   // Count total accounts for this campaign (includes prior partial batches)
   const { count: totalCount } = await supabaseAdmin

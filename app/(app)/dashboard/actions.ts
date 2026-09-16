@@ -116,6 +116,113 @@ export async function getCampaignIndustries(): Promise<string[]> {
   return [...new Set(data.map((r) => r.industry as string).filter(Boolean))].sort()
 }
 
+// ── Meeting prospects ─────────────────────────────────────────────────────────
+
+export type MeetingProspect = {
+  id: string
+  full_name: string | null
+  first_name: string | null
+  last_name: string | null
+  company_name: string | null
+  job_title: string | null
+  email: string | null
+  linkedin_url: string | null
+  created_at: string
+}
+
+export async function getMeetingProspects(): Promise<MeetingProspect[]> {
+  const { data, error } = await supabaseAdmin
+    .from("prospects")
+    .select("id, full_name, first_name, last_name, company_name, job_title, email, linkedin_url, created_at")
+    .eq("shortlist_status", "Reunión Agendada")
+    .order("created_at", { ascending: false })
+  if (error) throw new Error(error.message)
+  return (data ?? []) as MeetingProspect[]
+}
+
+// ── Scorecard ─────────────────────────────────────────────────────────────────
+
+export type WeekScorecardRow = {
+  iso_week: string   // "2026-W22" — sort key & dedup key for client
+  week_label: string // raw campaign label — client parses date for display
+  rep_name: string   // for per-rep scraped filter in client
+  scraped: number    // from campaigns.prospects_found
+  // Team totals for the week — sourced from prospects.created_at (not FK chain)
+  shortlisted: number
+  enriched: number
+  enviados: number
+  reuniones: number        // SQL+ only
+  reuniones_total: number  // all active deals (SQL + pre-SQL)
+}
+
+/** Extract the first YYYY-MM-DD date found in a campaign week_label string */
+function _extractDate(label: string): Date | null {
+  const m = label.match(/(\d{4}-\d{2}-\d{2})/)
+  if (!m) return null
+  const d = new Date(m[1] + "T12:00:00Z")
+  return isNaN(d.getTime()) ? null : d
+}
+
+/** Compute ISO 8601 week key ("2026-W22") for a given date */
+function _isoWeekKey(date: Date): string {
+  const d = new Date(date)
+  d.setUTCHours(12, 0, 0, 0)
+  const day = d.getUTCDay() || 7
+  d.setUTCDate(d.getUTCDate() + 4 - day)
+  const year = d.getUTCFullYear()
+  const jan4 = Date.UTC(year, 0, 4)
+  const week = 1 + Math.round(((d.getTime() - jan4) / 86400000 - 3 + (new Date(jan4).getUTCDay() || 7)) / 7)
+  return `${year}-W${String(week).padStart(2, "0")}`
+}
+
+export async function getScorecardData(): Promise<WeekScorecardRow[]> {
+  // Query 1: campaigns → scraped per (iso_week, rep_name)
+  const { data: camps, error: campErr } = await supabase
+    .from("campaigns")
+    .select("week_label, rep_name, prospects_found")
+  if (campErr) throw new Error(campErr.message)
+
+  type CampBucket = { iso_week: string; week_label: string; rep_name: string; scraped: number }
+  const campBuckets = new Map<string, CampBucket>()
+  for (const c of camps ?? []) {
+    const date = _extractDate(c.week_label)
+    if (!date) continue
+    const iso = _isoWeekKey(date)
+    const key = `${iso}||${c.rep_name}`
+    if (!campBuckets.has(key)) campBuckets.set(key, { iso_week: iso, week_label: c.week_label, rep_name: c.rep_name, scraped: 0 })
+    campBuckets.get(key)!.scraped += c.prospects_found ?? 0
+  }
+
+  // Query 2: Aggregate prospect funnel metrics by ISO week via RPC.
+  // Direct .select() is capped at PostgREST's 1000-row default; the RPC
+  // runs fully server-side and returns pre-aggregated counts.
+  const { data: metricsRows, error: pErr } = await supabaseAdmin
+    .rpc("get_prospect_scorecard")
+  if (pErr) throw new Error(pErr.message)
+
+  type WMetrics = { shortlisted: number; enriched: number; enviados: number; reuniones: number; reuniones_total: number }
+  const metricsMap = new Map<string, WMetrics>()
+  for (const r of (metricsRows ?? []) as { iso_week: string; shortlisted: number; enriched: number; enviados: number; reuniones: number; reuniones_total: number }[]) {
+    metricsMap.set(r.iso_week, {
+      shortlisted:     Number(r.shortlisted),
+      enriched:        Number(r.enriched),
+      enviados:        Number(r.enviados),
+      reuniones:       Number(r.reuniones),
+      reuniones_total: Number(r.reuniones_total ?? 0),
+    })
+  }
+
+  // Merge: one row per (iso_week, rep_name)
+  // Prospect metrics are TEAM totals for the week (same value for every rep in that week)
+  const rows: WeekScorecardRow[] = []
+  for (const [, b] of campBuckets) {
+    const m = metricsMap.get(b.iso_week) ?? { shortlisted: 0, enriched: 0, enviados: 0, reuniones: 0, reuniones_total: 0 }
+    rows.push({ iso_week: b.iso_week, week_label: b.week_label, rep_name: b.rep_name, scraped: b.scraped, ...m })
+  }
+
+  return rows.sort((a, b) => b.iso_week.localeCompare(a.iso_week))
+}
+
 export async function deleteCampaign(id: string) {
   const { error } = await supabase.from("campaigns").delete().eq("id", id)
   if (error) throw new Error(error.message)
@@ -168,7 +275,7 @@ export type AutoCampaign = {
 export async function createAutoCampaign(
   campaignData: { week_label: string; rep_name: string; industry: string; notes: string },
   autoConfig: AutoCampaignConfig
-): Promise<{ id: string } | { error: string }> {
+) {
   // Create campaign first
   const { data: campaign, error: campErr } = await supabaseAdmin
     .from("campaigns")
@@ -176,7 +283,7 @@ export async function createAutoCampaign(
     .select("id")
     .single()
 
-  if (campErr || !campaign) return { error: `campaigns.insert: ${campErr?.message ?? "sin data"}` }
+  if (campErr || !campaign) throw new Error(campErr?.message ?? "Error al crear campaña")
 
   // Create auto_campaign config linked to it
   const { error: autoErr } = await supabaseAdmin.from("auto_campaigns").insert({
@@ -187,7 +294,7 @@ export async function createAutoCampaign(
   if (autoErr) {
     // Rollback campaign creation
     await supabaseAdmin.from("campaigns").delete().eq("id", campaign.id)
-    return { error: `auto_campaigns.insert: ${autoErr.message}` }
+    throw new Error(autoErr.message)
   }
 
   // Advance immediately — llamamos advancePending directo con los datos que ya tenemos
@@ -205,7 +312,7 @@ export async function createAutoCampaign(
   }
 
   revalidatePath("/dashboard")
-  return { id: campaign.id }
+  return campaign.id
 }
 
 export async function getAutoCampaignForCampaign(campaignId: string): Promise<AutoCampaign | null> {

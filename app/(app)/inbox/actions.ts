@@ -37,9 +37,14 @@ export type ProspectReply = {
   } | null
 }
 
+import type { LinkedinSequenceConfig, EmailSequenceConfig } from "@/lib/sequence-configs"
+
 export type InboxConfig = {
   product_context: string | null
   calendly_link: string | null
+  linkedin_instructions: string | null
+  linkedin_sequence_config: LinkedinSequenceConfig | null
+  email_sequence_config: EmailSequenceConfig | null
   exclude_clients: boolean | null
   exclude_previous: boolean | null
 }
@@ -79,14 +84,17 @@ export async function getPendingCount(): Promise<number> {
 export async function getInboxConfig(): Promise<InboxConfig> {
   const { data } = await supabase
     .from("inbox_config")
-    .select("product_context, calendly_link, exclude_clients, exclude_previous")
+    .select("product_context, calendly_link, linkedin_instructions, linkedin_sequence_config, email_sequence_config, exclude_clients, exclude_previous")
     .eq("id", 1)
-    .maybeSingle()
+    .single()
   return {
     product_context: data?.product_context ?? null,
     calendly_link: data?.calendly_link ?? null,
-    exclude_clients: (data as Record<string, unknown>)?.exclude_clients as boolean | null ?? null,
-    exclude_previous: (data as Record<string, unknown>)?.exclude_previous as boolean | null ?? false,
+    linkedin_instructions: data?.linkedin_instructions ?? null,
+    linkedin_sequence_config: (data?.linkedin_sequence_config as LinkedinSequenceConfig | null) ?? null,
+    email_sequence_config: (data?.email_sequence_config as EmailSequenceConfig | null) ?? null,
+    exclude_clients: data?.exclude_clients ?? false,
+    exclude_previous: data?.exclude_previous ?? false,
   }
 }
 
@@ -135,9 +143,11 @@ export async function dismissReply(replyId: string): Promise<void> {
   revalidatePath("/inbox")
 }
 
-export async function regenerateDraft(replyId: string): Promise<void> {
+export async function regenerateDraft(replyId: string): Promise<{ ai_draft: string | null } | null> {
   await supabaseAdmin.from("prospect_replies").update({ status: "pending_review", ai_draft: null, intent: null, ai_reasoning: null }).eq("id", replyId)
   const { analyzeReply } = await import("@/lib/ai-reply")
   await analyzeReply(replyId)
   revalidatePath("/inbox")
+  const { data } = await supabaseAdmin.from("prospect_replies").select("ai_draft").eq("id", replyId).single()
+  return data ?? null
 }

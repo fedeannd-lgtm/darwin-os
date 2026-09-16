@@ -1,7 +1,7 @@
 "use client"
 
-import { useState } from "react"
-import { Loader2, Zap, Tags, CheckCircle2, ChevronsUpDown, Check, AlertTriangle, Search, X, Download, AlertCircle, ExternalLink, ChevronDown, Building2 } from "lucide-react"
+import { useState, useTransition } from "react"
+import { Loader2, Zap, Tags, CheckCircle2, ChevronsUpDown, Check, AlertTriangle, Search, X, Download, AlertCircle, ExternalLink, ChevronDown, Building2, Star } from "lucide-react"
 import type { ProviderStatus } from "../settings/provider-status"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -10,7 +10,7 @@ import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, Command
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
-import { getCampaigns, getProspectsForEnrichment, enrichOneProspect, classifyAllIcp, enrichPhoneForProspect, setProspectWhatsappPhone, normalizeNamesForCampaign } from "./actions"
+import { getCampaigns, getProspectsForEnrichment, enrichOneProspect, classifyAllIcp, enrichPhoneForProspect, setProspectWhatsappPhone, normalizeNamesForCampaign, addToShortlist } from "./actions"
 import { calculateOsScore } from "@/lib/scoring"
 
 type Campaign = { id: string; week_label: string; rep_name: string; industry: string; status: string; prospects_found: number | null }
@@ -247,6 +247,10 @@ export function EnrichmentClient({ campaigns, providerStatus }: { campaigns: Cam
   // Normalize company names state
   const [normalizing, setNormalizing] = useState(false)
   const [normalizeResult, setNormalizeResult] = useState<number | null>(null)
+
+  // Shortlist state
+  const [shortlisting, startShortlist] = useTransition()
+  const [shortlistDone, setShortlistDone] = useState(false)
 
   const selectedCampaign = campaigns.find((c) => c.id === campaignId)
 
@@ -605,6 +609,32 @@ export function EnrichmentClient({ campaigns, providerStatus }: { campaigns: Cam
                 </p>
               )}
               <p className="text-[11px] text-muted-foreground">Capitaliza nombres de personas y quita S.A., SAC, SRL, Argentina, etc. de empresas.</p>
+            </CardContent>
+          </Card>
+
+          {/* Shortlist */}
+          <Card>
+            <CardContent className="pt-4 space-y-2">
+              <Button
+                variant="outline"
+                className="w-full"
+                onClick={() => {
+                  setShortlistDone(false)
+                  startShortlist(async () => {
+                    await addToShortlist([...selectedIds])
+                    setShortlistDone(true)
+                  })
+                }}
+                disabled={!campaignId || loadingProspects || shortlisting || selectedIds.size === 0}
+              >
+                {shortlisting
+                  ? <><Loader2 className="mr-2 size-4 animate-spin" />Agregando…</>
+                  : <><Star className="mr-2 size-4" />Shortlist{selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}</>}
+              </Button>
+              {shortlistDone && (
+                <p className="text-[11px] text-green-700">Agregados a Shortlist.</p>
+              )}
+              <p className="text-[11px] text-muted-foreground">Lleva prospectos seleccionados a Shortlist para generar secuencias con IA.</p>
             </CardContent>
           </Card>
 

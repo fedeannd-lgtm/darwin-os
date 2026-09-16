@@ -1,9 +1,12 @@
 {
   "manifest_version": 3,
   "name": "ProspectOS",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Crea listas de cuentas en Sales Navigator desde ProspectOS",
   "permissions": ["storage"],
+  "background": {
+    "service_worker": "background.js"
+  },
   "host_permissions": [
     "https://www.linkedin.com/*",
     "http://localhost:3000/*",

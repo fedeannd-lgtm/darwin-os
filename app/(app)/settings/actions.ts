@@ -128,6 +128,67 @@ export async function getProviderUsage(): Promise<ProviderUsage[]> {
   })
 }
 
+// ── Client companies ──────────────────────────────────────────────────────────
+
+export type ClientCompany = {
+  id: string
+  company_name: string
+  linkedin_url: string | null
+  sales_nav_id: string | null
+  domain: string | null
+}
+
+export async function getClientCompanies(): Promise<ClientCompany[]> {
+  const { data, error } = await supabase
+    .from("client_companies")
+    .select("id, company_name, linkedin_url, sales_nav_id, domain")
+    .order("company_name")
+  if (error) throw new Error(error.message)
+  return (data ?? []) as ClientCompany[]
+}
+
+export async function saveClientCompanies(
+  entries: { company_name: string; linkedin_url?: string | null; domain?: string | null }[]
+): Promise<void> {
+  // Deduplicate by normalized name
+  const seen = new Set<string>()
+  const rows = entries
+    .filter((e) => e.company_name.trim())
+    .filter((e) => {
+      const key = e.company_name.trim().toLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .map((e) => ({ company_name: e.company_name.trim(), linkedin_url: e.linkedin_url || null, domain: e.domain || null }))
+
+  await supabaseAdmin.from("client_companies").delete().neq("id", "00000000-0000-0000-0000-000000000000")
+  if (rows.length > 0) await supabaseAdmin.from("client_companies").insert(rows)
+  revalidatePath("/settings")
+}
+
+export async function updateClientCompanySalesNavIds(
+  results: { company_name: string; sales_nav_id: string }[]
+): Promise<void> {
+  for (const { company_name, sales_nav_id } of results) {
+    await supabaseAdmin
+      .from("client_companies")
+      .update({ sales_nav_id })
+      .eq("company_name", company_name)
+  }
+}
+
+export async function updateClientCompanyLinkedinUrl(
+  id: string,
+  linkedin_url: string | null
+): Promise<void> {
+  await supabaseAdmin
+    .from("client_companies")
+    .update({ linkedin_url: linkedin_url || null })
+    .eq("id", id)
+  revalidatePath("/settings")
+}
+
 export async function getCampaignIndustries(): Promise<string[]> {
   const { data } = await supabase
     .from("campaigns")
@@ -207,4 +268,205 @@ export async function upsertRepCookie(repName: string, cookie: string) {
     )
   if (error) throw new Error(error.message)
   revalidatePath("/settings")
+}
+
+// ── HubSpot sync ─────────────────────────────────────────────────────────────
+
+/**
+ * Stages that indicate a SQL-qualified meeting (Sales Qualified Lead or above).
+ * Prospects from these deals get shortlist_status = 'Reunión Agendada'.
+ */
+/** SQL-qualified meetings → shortlist_status = 'Reunión Agendada' */
+const QUALIFYING_STAGE_LABELS = new Set([
+  "Interested",
+  "Sales Qualified Lead",
+  "Sales Qualified Opportunity",
+  "Advanced Opportunity",
+  "Integration in progress",
+  "Trial in progress",
+  "Won",
+])
+
+/**
+ * Stages that mean the deal is dead — excluded from both SQL and Total counts.
+ * "On Hold" and "Oppty Lost" are intentionally NOT here so they count in Total.
+ */
+const LOST_STAGE_LABELS = new Set([
+  "Closed Lost",
+  "Lost",
+  "Not Interested",
+  "Disqualified",
+  "No Show",
+])
+
+/** Normalize a company name for fuzzy matching:
+ *  - lowercase
+ *  - strip trailing legal suffixes (S.A., S.R.L., II, etc.)
+ *  - strip parenthetical content
+ *  - trim
+ */
+function _normalizeCompanyName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/\s*\(.*?\)\s*/g, " ")       // remove (Junio 2026) etc.
+    .replace(/\s+(i{1,3}|iv|v|vi{0,3}|ix|x)\s*$/i, "") // trailing roman numerals
+    .replace(/\s+(s\.?a\.?s?\.?|s\.?r\.?l\.?|inc\.?|ltd\.?|llc\.?|s\.?p\.?a\.?)\s*$/i, "")
+    .replace(/[^\w\s]/g, " ")             // punctuation → space
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+export async function syncHubspotDeals(): Promise<{ updated: number; error?: string }> {
+  try {
+    const { getDealPipelineStages, getAllDeals, getContactEmails, getCompanyInfo } = await import("@/lib/hubspot")
+
+    // Resolve stage label → internal IDs
+    const stages = await getDealPipelineStages()
+    const qualifyingIds = new Set(
+      stages.filter((s) => QUALIFYING_STAGE_LABELS.has(s.label)).map((s) => s.id)
+    )
+    const lostIds = new Set(
+      stages.filter((s) => LOST_STAGE_LABELS.has(s.label)).map((s) => s.id)
+    )
+
+    // Pull all deals; keep only qualifying ones
+    const allDeals = await getAllDeals()
+    const qualifying = allDeals.filter(
+      (d) => d.dealstage && qualifyingIds.has(d.dealstage)
+    )
+
+    if (qualifying.length === 0) return { updated: 0 }
+
+    let totalUpdated = 0
+
+    // ── Pass 1: match by contact email ────────────────────────────────────────
+    const contactIds = [...new Set(qualifying.flatMap((d) => d.associatedContacts))]
+    if (contactIds.length > 0) {
+      const emailMap = await getContactEmails(contactIds)
+      const emails = [...emailMap.values()]
+      if (emails.length > 0) {
+        const { error, count } = await supabaseAdmin
+          .from("prospects")
+          .update({ shortlist_status: "Reunión Agendada" })
+          .in("email", emails)
+          .neq("shortlist_status", "Reunión Agendada")
+        if (error) throw new Error(error.message)
+        totalUpdated += count ?? 0
+      }
+    }
+
+    // ── Pass 2: match by company name / domain ────────────────────────────────
+    const companyIds = [...new Set(qualifying.flatMap((d) => d.associatedCompanies))]
+    if (companyIds.length > 0) {
+      const companyMap = await getCompanyInfo(companyIds)
+
+      // Build OR filter for Supabase: one ilike per company name + one eq per domain
+      const orParts: string[] = []
+      const domains: string[] = []
+
+      for (const company of companyMap.values()) {
+        if (company.name) {
+          const normalized = _normalizeCompanyName(company.name)
+          if (normalized.length >= 3) {
+            // escape % and _ so they're treated as literals in the LIKE pattern
+            const escaped = normalized.replace(/%/g, "\\%").replace(/_/g, "\\_")
+            orParts.push(`company_name.ilike.%${escaped}%`)
+          }
+        }
+        if (company.domain) {
+          domains.push(company.domain.toLowerCase())
+        }
+      }
+
+      if (orParts.length > 0 || domains.length > 0) {
+        // Fetch candidates — can't do .update + .or directly on Supabase JS,
+        // so select IDs first then bulk update
+        let query = supabaseAdmin
+          .from("prospects")
+          .select("id")
+          .neq("shortlist_status", "Reunión Agendada")
+
+        const allOrParts = [
+          ...orParts,
+          ...(domains.length > 0 ? [`company_domain.in.(${domains.join(",")})`] : []),
+        ]
+
+        if (allOrParts.length > 0) {
+          query = query.or(allOrParts.join(","))
+        }
+
+        const { data: candidates } = await query
+        const ids = (candidates ?? []).map((r: { id: string }) => r.id)
+
+        if (ids.length > 0) {
+          // Update in batches of 500 to avoid URL length limits
+          for (let i = 0; i < ids.length; i += 500) {
+            const batch = ids.slice(i, i + 500)
+            const { error, count } = await supabaseAdmin
+              .from("prospects")
+              .update({ shortlist_status: "Reunión Agendada" })
+              .in("id", batch)
+            if (error) throw new Error(error.message)
+            totalUpdated += count ?? 0
+          }
+        }
+      }
+    }
+
+    // ── Pass 3: pre-SQL active deals → 'Reunión No SQL' ─────────────────────
+    // Any deal that's not qualifying (SQL+) and not lost = meeting happened but not yet qualified
+    const preSql = allDeals.filter(
+      (d) => d.dealstage && !qualifyingIds.has(d.dealstage) && !lostIds.has(d.dealstage)
+    )
+    if (preSql.length > 0) {
+      // Email pass
+      const preSqlContactIds = [...new Set(preSql.flatMap((d) => d.associatedContacts))]
+      if (preSqlContactIds.length > 0) {
+        const preSqlEmailMap = await getContactEmails(preSqlContactIds)
+        const preSqlEmails = [...preSqlEmailMap.values()]
+        if (preSqlEmails.length > 0) {
+          await supabaseAdmin
+            .from("prospects")
+            .update({ shortlist_status: "Reunión No SQL" })
+            .in("email", preSqlEmails)
+            .not("shortlist_status", "in", '("Reunión Agendada")')
+        }
+      }
+      // Company pass
+      const preSqlCompanyIds = [...new Set(preSql.flatMap((d) => d.associatedCompanies))]
+      if (preSqlCompanyIds.length > 0) {
+        const preSqlCompanyMap = await getCompanyInfo(preSqlCompanyIds)
+        const orParts: string[] = []
+        for (const company of preSqlCompanyMap.values()) {
+          if (company.name) {
+            const normalized = _normalizeCompanyName(company.name)
+            if (normalized.length >= 3) {
+              const escaped = normalized.replace(/%/g, "\\%").replace(/_/g, "\\_")
+              orParts.push(`company_name.ilike.%${escaped}%`)
+            }
+          }
+        }
+        if (orParts.length > 0) {
+          const { data: candidates } = await supabaseAdmin
+            .from("prospects")
+            .select("id")
+            .not("shortlist_status", "in", '("Reunión Agendada")')
+            .neq("shortlist_status", "Reunión No SQL")
+            .or(orParts.join(","))
+          const ids = (candidates ?? []).map((r: { id: string }) => r.id)
+          for (let i = 0; i < ids.length; i += 500) {
+            await supabaseAdmin
+              .from("prospects")
+              .update({ shortlist_status: "Reunión No SQL" })
+              .in("id", ids.slice(i, i + 500))
+          }
+        }
+      }
+    }
+
+    revalidatePath("/shortlist")
+    return { updated: totalUpdated }
+  } catch (e) {
+    return { updated: 0, error: e instanceof Error ? e.message : "Error desconocido" }
+  }
 }

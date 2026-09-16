@@ -147,6 +147,15 @@ export async function classifyAllIcp(campaignId: string): Promise<number> {
   return updated
 }
 
+export async function addToShortlist(prospectIds: string[]): Promise<void> {
+  await supabaseAdmin
+    .from("prospects")
+    .update({ shortlisted: true })
+    .in("id", prospectIds)
+  revalidatePath("/enrichment")
+  revalidatePath("/shortlist")
+}
+
 export async function enrichPhoneForProspect(prospectId: string): Promise<string | null> {
   const { data: p } = await supabase
     .from("prospects")

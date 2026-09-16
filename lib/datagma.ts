@@ -57,25 +57,39 @@ function looksLikePhone(s: string | null | undefined): s is string {
 }
 
 function extractPhoneFromDatagma(data: Record<string, unknown>): string | null {
-  // /v1/search response: { data: [{ phones: [...] }] } or { phones: [...] }
+  // /v1/search response: { person: { phones: [{ display_international, display, number, country_code, type }] } }
   // /v2/full response:   { phones: [...] } or { phone: "..." }
   if (looksLikePhone(data?.phone as string)) return data.phone as string
 
-  const phones = (data?.phones ?? (Array.isArray(data?.data) ? (data.data as Record<string, unknown>[])[0]?.phones : null)) as unknown
-  if (Array.isArray(phones) && phones.length > 0) {
-    for (const first of phones) {
-      if (looksLikePhone(first as string)) return first as string
-      if (typeof first === "object" && first !== null) {
+  // v1/search nests phones under data.person.phones
+  const personPhones = (data?.person as Record<string, unknown> | null)?.phones
+  const rawPhones = Array.isArray(personPhones) ? personPhones : (data?.phones ?? null)
+
+  if (Array.isArray(rawPhones) && rawPhones.length > 0) {
+    // Prefer mobile type
+    const sorted = [...rawPhones].sort((a: unknown, b: unknown) =>
+      ((a as Record<string, unknown>)?.type === "mobile" ? 0 : 1) -
+      ((b as Record<string, unknown>)?.type === "mobile" ? 0 : 1)
+    )
+    for (const entry of sorted) {
+      if (typeof entry === "string" && looksLikePhone(entry)) return entry
+      if (typeof entry === "object" && entry !== null) {
+        const p = entry as Record<string, unknown>
+        const cc = p.country_code != null && p.number != null
+          ? `+${p.country_code}${p.number}` : null
         const candidate =
-          (first as Record<string, unknown>).phoneNumber as string
-          ?? (first as Record<string, unknown>).number as string
-          ?? (first as Record<string, unknown>).phone as string
-        if (looksLikePhone(candidate)) return candidate
+          (p.display_international as string | null) ??
+          (p.displayInternational as string | null) ??
+          (p.display as string | null) ??
+          (p.phoneNumber as string | null) ??
+          (p.phone as string | null) ??
+          cc
+        if (looksLikePhone(candidate)) return candidate as string
       }
     }
   }
 
-  // Nested: data[0].phones
+  // Nested: data.data[].phones
   if (Array.isArray(data?.data)) {
     for (const item of data.data as Record<string, unknown>[]) {
       const p = extractPhoneFromDatagma(item)

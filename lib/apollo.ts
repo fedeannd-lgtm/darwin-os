@@ -9,7 +9,7 @@ export type ApolloResult = {
 }
 
 async function matchPerson(payload: Record<string, unknown>): Promise<{ person: Record<string, unknown> } | null> {
-  const res = await fetch("https://api.apollo.io/v1/people/match", {
+  const res = await fetch("https://api.apollo.io/api/v1/people/match", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -50,7 +50,7 @@ async function searchPeopleAtCompany(
   lastName: string,
   companyDomain: string,
 ): Promise<{ email: string; linkedInUrl: string | null } | null> {
-  const res = await fetch("https://api.apollo.io/v1/mixed_people/api_search", {
+  const res = await fetch("https://api.apollo.io/api/v1/mixed_people/api_search", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -164,6 +164,23 @@ export async function findEmailApollo(
     return { email: null, canonicalLinkedInUrl: null, apolloEmailStatus: null, phone: null, apolloId: null }
   } catch {
     return { email: null, canonicalLinkedInUrl: null, apolloEmailStatus: null, phone: null, apolloId: null }
+  }
+}
+
+// Lookup a company's primary domain by name — does NOT consume lead credits
+export async function apolloOrgLookup(companyName: string): Promise<string | null> {
+  if (!APOLLO_API_KEY || !companyName) return null
+  try {
+    const res = await fetch("https://api.apollo.io/api/v1/organizations/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": APOLLO_API_KEY },
+      body: JSON.stringify({ q_organization_name: companyName, per_page: 1 }),
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    return (data?.organizations?.[0]?.primary_domain as string) ?? null
+  } catch {
+    return null
   }
 }
 

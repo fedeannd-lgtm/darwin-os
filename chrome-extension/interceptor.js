@@ -2,41 +2,50 @@
 (function () {
   console.log('[ProspectOS interceptor] loaded on', window.location.pathname);
 
-  function extractWebsite(data) {
-    if (!data || typeof data !== 'object') return '';
-    const urlFields = ['website', 'companyUrl', 'websiteUrl', 'homepageUrl', 'companyWebsite', 'siteUrl', 'companyPageUrl', 'externalWebsiteUrl', 'landingPageUrl'];
-    const domainFields = ['primaryDomain', 'domain', 'url', 'companyDomain'];
-    const allFields = [...urlFields, ...domainFields];
+  const urlFields = [
+    'website', 'companyUrl', 'websiteUrl', 'homepageUrl', 'companyWebsite',
+    'siteUrl', 'companyPageUrl', 'externalWebsiteUrl', 'landingPageUrl',
+    'companyHomePageUrl', 'websiteDisplay', 'externalWebsite', 'publicWebsite',
+    'webUrl', 'siteLink', 'officialWebsite', 'externalUrl', 'companyHomePage',
+  ];
+  const domainFields = ['primaryDomain', 'domain', 'url', 'companyDomain'];
+  const allFields = [...urlFields, ...domainFields];
 
-    function valueToUrl(f, v) {
-      if (!v || typeof v !== 'string') return '';
-      if (v.startsWith('http')) return v;
-      // domain-only fields: wrap with https
-      if (domainFields.includes(f) && /^[\w.-]+\.[a-z]{2,}/.test(v)) return `https://${v}`;
+  function valueToUrl(f, v) {
+    if (!v || typeof v !== 'string') return '';
+    if (v.startsWith('http')) return v;
+    if (domainFields.includes(f) && /^[\w.-]+\.[a-z]{2,}/.test(v)) return `https://${v}`;
+    return '';
+  }
+
+  // Recursive search up to depth 5 — handles deeply nested LinkedIn API responses
+  function extractWebsite(data, depth) {
+    if (depth === undefined) depth = 0;
+    if (!data || typeof data !== 'object' || depth > 5) return '';
+
+    if (Array.isArray(data)) {
+      for (const item of data) {
+        const r = extractWebsite(item, depth + 1);
+        if (r) return r;
+      }
       return '';
     }
 
+    // Check fields at this level first
     for (const f of allFields) {
       const url = valueToUrl(f, data[f]);
       if (url) return url;
     }
-    // Two levels deep
+
+    // Recurse into object values
     for (const key of Object.keys(data)) {
       const val = data[key];
-      if (!val || typeof val !== 'object' || Array.isArray(val)) continue;
-      for (const f of allFields) {
-        const url = valueToUrl(f, val[f]);
-        if (url) return url;
-      }
-      for (const key2 of Object.keys(val)) {
-        const val2 = val[key2];
-        if (!val2 || typeof val2 !== 'object' || Array.isArray(val2)) continue;
-        for (const f of allFields) {
-          const url = valueToUrl(f, val2[f]);
-          if (url) return url;
-        }
+      if (val && typeof val === 'object') {
+        const r = extractWebsite(val, depth + 1);
+        if (r) return r;
       }
     }
+
     return '';
   }
 
@@ -66,7 +75,7 @@
 
     function capture(obj) {
       if (!obj || typeof obj !== 'object') return;
-      const website = extractWebsite(obj);
+      const website = extractWebsite(obj, 0);
       const rawId = obj.id || obj.companyId || obj.entityUrn || '';
       // Extract numeric ID from URN like "urn:li:fs_salesCompany:40847945"
       const numMatch = String(rawId).match(/(\d+)$/);

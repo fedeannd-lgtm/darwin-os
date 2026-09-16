@@ -32,12 +32,8 @@
 
         try {
           const base = new URL(storedCb).origin;
-          const r = await fetch(`${base}/api/extension/register-list`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ campaignId: storedCampaignId, listId, listName }),
-          });
-          if (r.ok) {
+          const r = await posApiFetch(`${base}/api/extension/register-list`, 'POST', { campaignId: storedCampaignId, listId, listName });
+          if (r?.ok) {
             badge.style.background = 'rgba(22,163,74,0.92)';
             badge.textContent = `✅ Lista "${listName}" registrada en ProspectOS`;
             localStorage.removeItem('_pos_campaign_id');
@@ -126,11 +122,7 @@
       badge.textContent = `⚡ ProspectOS: enviando ${count.toLocaleString()} resultados…`;
 
       try {
-        await fetch(decodeURIComponent(cb), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ repName, industry, count, urlIndex }),
-        });
+        await posApiFetch(decodeURIComponent(cb), 'POST', { repName, industry, count, urlIndex });
         badge.style.background = 'rgba(22,163,74,0.92)';
         badge.textContent = `✅ ProspectOS: ${count.toLocaleString()} resultados guardados`;
       } catch {
@@ -144,13 +136,15 @@
 
   // ── Mode: people_scrape ──────────────────────────────────────────────────────
   // Params are appended to the existing Sales Nav hash (e.g. #query=(...)&_mode=people_scrape&_job=xxx)
-  const mode = hashParams.get('_mode');
-  const jobId = hashParams.get('_job');
-  const scrapeCb = hashParams.get('_cb');
+  // Fallback to query params for modes that open a fresh page (e.g. create_account_list → /sales/home)
+  const mode = hashParams.get('_mode') || params.get('_mode');
+  const jobId = hashParams.get('_job') || params.get('_job');
+  const scrapeCb = hashParams.get('_cb') || params.get('_cb');
 
   const decodedCb = scrapeCb ? decodeURIComponent(scrapeCb) : scrapeCb;
-  const maxResults = parseInt(hashParams.get('_max') || '500', 10);
-  console.log('[ProspectOS] scrape params:', { mode, jobId, maxResults, decodedCb });
+  const maxResults = parseInt(hashParams.get('_max') || params.get('_max') || '500', 10);
+  const startAtPage = parseInt(hashParams.get('page') || '1', 10);
+  console.log('[ProspectOS] scrape params:', { mode, jobId, maxResults, startAtPage, decodedCb });
 
   if (mode === 'people_scrape' && jobId && scrapeCb) {
     await runPeopleScrape(jobId, decodedCb, maxResults);
@@ -164,7 +158,12 @@
       localStorage.setItem('_pos_campaign_id', campaignParam);
       localStorage.setItem('_pos_cb', decodedCb);
     }
-    await runCompanyScrape(jobId, decodedCb, maxResults);
+    await runCompanyScrape(jobId, decodedCb, maxResults, startAtPage);
+    return;
+  }
+
+  if (params.get('prospectOS') === 'create_client_list' && params.get('_cb')) {
+    await runCreateClientList(decodeURIComponent(params.get('_cb')));
     return;
   }
 
@@ -173,12 +172,19 @@
     return;
   }
 
-  // ── Mode: create account list ────────────────────────────────────────────────
-  if (!params.has('prospectOS')) return;
-  if (params.get('prospectOS') === 'create_client_list' && params.get('_cb')) {
-    await runCreateClientList(decodeURIComponent(params.get('_cb')));
+  // ── Mode: auto create account list (auto campaign flow) ──────────────────────
+  if (mode === 'create_account_list') {
+    const autoCampaignId = hashParams.get('_campaign') || params.get('_campaign');
+    const rawApp = hashParams.get('_app') || params.get('_app');
+    const appBase = rawApp ? decodeURIComponent(rawApp) : null;
+    if (autoCampaignId && appBase) {
+      await runAutoCreateAccountList(autoCampaignId, appBase);
+    }
     return;
   }
+
+  // ── Mode: create account list ────────────────────────────────────────────────
+  if (!params.has('prospectOS')) return;
   if (params.get('prospectOS') !== 'create') return;
 
   const campaignId = params.get('campaignId');
@@ -378,12 +384,9 @@ async function checkAndRunPendingJob() {
 
   let job = null;
   try {
-    const res = await fetch(`${baseUrl}/api/extension/pending-job`, {
-      signal: AbortSignal.timeout(8000),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.jobId) job = { jobId: data.jobId, callbackUrl: `${baseUrl}/api/extension/results` };
+    const res = await posApiFetch(`${baseUrl}/api/extension/pending-job`);
+    if (res?.ok && res?.data?.jobId) {
+      job = { jobId: res.data.jobId, callbackUrl: `${baseUrl}/api/extension/results` };
     }
   } catch (e) {
     console.log('[ProspectOS] no pending job found:', e.message);
@@ -451,11 +454,7 @@ async function runPeopleScrape(jobId, callbackUrl, maxResults = 500) {
       if (!loaded) {
         setStatus(`⚠️ Timeout en página ${page} — cerrando job con ${totalScraped} personas scrapeadas.`);
         setProgress('Podés cerrar esta pestaña.');
-        await fetch(`${callbackUrl}?jobId=${jobId}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ items: [], done: true }),
-        }).catch(() => {});
+        await posApiFetch(`${callbackUrl}?jobId=${jobId}`, 'POST', { items: [], done: true }).catch(() => {});
         setTimeout(() => window.close(), 4000);
         return;
       }
@@ -472,12 +471,8 @@ async function runPeopleScrape(jobId, callbackUrl, maxResults = 500) {
       const fetchUrl = `${callbackUrl}?jobId=${jobId}`;
       console.log('[ProspectOS] posting to:', fetchUrl);
       try {
-        const res = await fetch(fetchUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ items: people, done }),
-        });
-        console.log('[ProspectOS] response status:', res.status);
+        const res = await posApiFetch(fetchUrl, 'POST', { items: people, done });
+        console.log('[ProspectOS] response status:', res?.status);
       } catch (fetchErr) {
         throw new Error(`Fetch falló → ${fetchUrl}\n${fetchErr.message}`);
       }
@@ -722,7 +717,7 @@ function scrapePeopleFromPage(seen = new Set()) {
 
 // ── Company Scrape ───────────────────────────────────────────────────────────
 
-async function runCompanyScrape(jobId, callbackUrl, maxResults = 50) {
+async function runCompanyScrape(jobId, callbackUrl, maxResults = 50, startAtPage = 1) {
   return withScrapeLock('company-scrape', async () => {
   const overlay = createOverlay();
   const { setStatus, setProgress } = overlay;
@@ -731,6 +726,20 @@ async function runCompanyScrape(jobId, callbackUrl, maxResults = 50) {
     setStatus('Esperando que Sales Nav cargue…');
     await new Promise(r => setTimeout(r, 4000));
 
+    // ── Navigate to starting page ─────────────────────────────────────────────
+    if (startAtPage > 1) {
+      setStatus(`Navegando a página ${startAtPage}…`);
+      await waitForSelector('a[href*="/sales/company/"]', 120000);
+      for (let p = 1; p < startAtPage; p++) {
+        const nextBtn = findNextButton();
+        if (!nextBtn) { setStatus(`⚠️ No se encontró botón siguiente en página ${p}`); break; }
+        nextBtn.click();
+        setProgress(`Saltando a pág. ${p + 1} de ${startAtPage}…`);
+        await new Promise(r => setTimeout(r, 3500));
+        await waitForSelector('a[href*="/sales/company/"]', 120000);
+      }
+    }
+
     // ── Phase 1: scroll + paginate through search results ────────────────────
     const allCompanies = [];
     const globalSeen = new Set();
@@ -738,7 +747,7 @@ async function runCompanyScrape(jobId, callbackUrl, maxResults = 50) {
     const MAX_PAGES = Math.ceil(maxResults / 25) + 2;
 
     while (page <= MAX_PAGES && allCompanies.length < maxResults) {
-      setStatus(`Leyendo página ${page}…`);
+      setStatus(`Leyendo página ${startAtPage + page - 1}…`);
       await waitForSelector('a[href*="/sales/company/"]', 120000);
 
       const pageCompanies = await scrapeCompaniesWhileScrolling(globalSeen);
@@ -756,11 +765,7 @@ async function runCompanyScrape(jobId, callbackUrl, maxResults = 50) {
     }
 
     if (allCompanies.length === 0) {
-      await fetch(`${callbackUrl}?jobId=${jobId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: [], done: true }),
-      });
+      await posApiFetch(`${callbackUrl}?jobId=${jobId}`, 'POST', { items: [], done: true });
       setStatus('No se encontraron empresas.');
       setTimeout(() => window.close(), 3000);
       return;
@@ -880,7 +885,7 @@ function deepHasPremium(root) {
 }
 
 function extractWebsiteFromDOM() {
-  const SKIP = /linkedin\.com|google\.com|bing\.com|microsoft\.com|twitter\.com|facebook\.com|instagram\.com|youtube\.com|t\.co\//i;
+  const SKIP = /linkedin\.com|google\.com|bing\.com|microsoft\.com|twitter\.com|x\.com|facebook\.com|instagram\.com|youtube\.com|t\.co\/|xing\.com|crunchbase\.com/i;
 
   function unwrapHref(href) {
     if (!href || !href.startsWith('http')) return '';
@@ -894,9 +899,20 @@ function extractWebsiteFromDOM() {
     return SKIP.test(href) ? '' : href;
   }
 
-  // Strategy 0: direct attribute selector — most reliable, Sales Nav always uses this
-  // Note: don't require [href] in the selector — sometimes href is a JS property, not HTML attribute
-  const directLink = document.querySelector('[data-control-name="visit_company_website"]');
+  // Strategy 0: deep shadow-DOM-aware selector (Sales Nav renders inside shadow roots)
+  function querySelectorDeep(root, selector) {
+    const found = root.querySelector(selector);
+    if (found) return found;
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) {
+        const inner = querySelectorDeep(el.shadowRoot, selector);
+        if (inner) return inner;
+      }
+    }
+    return null;
+  }
+
+  const directLink = querySelectorDeep(document, '[data-control-name="visit_company_website"]');
   if (directLink) {
     const href = directLink.getAttribute('href') || directLink.href || '';
     const url = unwrapHref(href);
@@ -917,6 +933,9 @@ function extractWebsiteFromDOM() {
 
   const links = collectLinks(document);
 
+  // Domain-like TLDs — link text that looks like a domain counts as a website link
+  const DOMAIN_PATTERN = /\.(com|net|org|io|co|pe|ar|mx|cl|br|uy|bo|py|ec|ve|do|gt|hn|sv|ni|cr|pa|cu|pr|info|biz|us|eu|uk|de|fr|es|it|nl|se|no|dk|fi|pl|ru|cn|jp|au|nz)(\/|$|\s)/i;
+
   for (const link of links) {
     const href = link.href || link.getAttribute('href') || '';
     if (!href.startsWith('http')) continue;
@@ -926,10 +945,12 @@ function extractWebsiteFromDOM() {
     const title = (link.getAttribute('title') || '').toLowerCase();
     const parentAria = (link.closest('[aria-label]')?.getAttribute('aria-label') || '').toLowerCase();
 
-    const isWebsiteLink = text.includes('sitio web') || text.includes('website') ||
-        ariaLabel.includes('sitio') || ariaLabel.includes('website') ||
-        title.includes('sitio') || title.includes('website') ||
-        parentAria.includes('sitio') || parentAria.includes('website');
+    const isWebsiteLink =
+      text.includes('sitio web') || text.includes('website') ||
+      ariaLabel.includes('sitio') || ariaLabel.includes('website') ||
+      title.includes('sitio') || title.includes('website') ||
+      parentAria.includes('sitio') || parentAria.includes('website') ||
+      DOMAIN_PATTERN.test(text); // link text looks like a domain ("ransa.com.pe")
 
     if (isWebsiteLink) {
       const url = unwrapHref(href);
@@ -970,168 +991,167 @@ function extractWebsiteFromDOM() {
     }
   } catch (e) {}
 
+  // Strategy 3: on company profile pages, any single external non-social link = the website
+  try {
+    if (window.location.pathname.includes('/sales/company/')) {
+      const externalUrls = links
+        .map(a => unwrapHref(a.href || a.getAttribute('href') || ''))
+        .filter(Boolean);
+      // Deduplicate
+      const unique = [...new Set(externalUrls)];
+      if (unique.length === 1) {
+        console.log('[ProspectOS] strategy 3 (sole external link) → website:', unique[0]);
+        return unique[0];
+      }
+      // Multiple externals: pick the one whose hostname matches the page title / company name
+      if (unique.length > 1) {
+        // Prefer shorter URLs (company root domains over deep paths)
+        const sorted = unique.sort((a, b) => a.length - b.length);
+        console.log('[ProspectOS] strategy 3 (shortest external link) → website:', sorted[0]);
+        return sorted[0];
+      }
+    }
+  } catch (e) {}
+
   return '';
 }
 
-async function runCompanyProfileVisit(state) {
-  return withScrapeLock('company-visit', async () => {
-  const { jobId, callbackUrl, companies, currentIndex } = state;
+// ── Auto: create account list from scraped campaign companies ─────────────────
+// Called when the dashboard "Crear Lista de Cuentas" button opens Sales Nav with
+// _mode=create_account_list in the hash. Fetches company IDs from ProspectOS,
+// creates the Sales Nav list, then POSTs the list_id back so the engine can advance.
+
+async function runAutoCreateAccountList(campaignId, appBase) {
   const overlay = createOverlay();
   const { setStatus, setProgress } = overlay;
 
   try {
-    const company = companies[currentIndex];
-    setStatus(`Capturando website (${currentIndex + 1}/${companies.length})…`);
-    setProgress(company.companyName);
+    setStatus('Obteniendo empresas de ProspectOS…');
+    setProgress('');
 
-    const numericId = company.id.match(/(\d+)$/)?.[1] || company.id;
-    const storageKey = `__pos_w_${numericId}`;
-
-    // Wait for the SPA to render (body text growing means JS app has started)
-    const pageDeadline = Date.now() + 12000;
-    while (Date.now() < pageDeadline) {
-      if ((document.body?.innerText?.length || 0) > 500) break;
-      await new Promise(r => setTimeout(r, 500));
+    const dataRes = await posApiFetch(`${appBase}/api/extension/auto-account-list?campaignId=${campaignId}`);
+    if (!dataRes?.ok || !dataRes?.data) {
+      throw new Error('No se pudieron obtener las empresas de la campaña.');
     }
 
-    const deadline = Date.now() + 12000;
-    let website = '';
-    while (Date.now() < deadline) {
-      // 1. Try interceptor sessionStorage (world: MAIN)
-      website = sessionStorage.getItem(storageKey) || '';
-      // 2. Fallback: deep shadow DOM traversal
-      if (!website) website = extractWebsiteFromDOM();
-      if (website) break;
-      if (/no hemos podido encontrar|page not found/i.test(document.body?.innerText || '')) break;
-      await new Promise(r => setTimeout(r, 600));
+    const { listName, companyIds } = dataRes.data;
+    if (!companyIds?.length) {
+      throw new Error('La campaña no tiene empresas scrapeadas aún.');
     }
 
-    sessionStorage.removeItem(storageKey);
-    companies[currentIndex].website = website;
-    console.log('[ProspectOS]', company.companyName, '→', website || '(no website)');
+    setProgress(`${companyIds.length} empresas encontradas`);
 
-    const nextIndex = currentIndex + 1;
+    // ── Create Sales Nav list (same logic as prospectOS=create flow) ──────────
+    const jsessionRaw = document.cookie.split(';')
+      .map(c => c.trim().split('='))
+      .find(([k]) => k === 'JSESSIONID')?.[1]?.replace(/"/g, '') || '';
+    const csrfToken = jsessionRaw.startsWith('ajax:') ? jsessionRaw : `ajax:${jsessionRaw}`;
 
-    if (nextIndex < companies.length) {
-      sessionStorage.setItem('prospectOS_company_visit', JSON.stringify({
-        ...state,
-        companies,
-        currentIndex: nextIndex,
-      }));
-      window.location.href = `https://www.linkedin.com/sales/company/${companies[nextIndex].id}`;
-    } else {
-      sessionStorage.removeItem('prospectOS_company_visit');
-      setStatus(`Enviando ${companies.length} empresas a ProspectOS…`);
-      setProgress('');
+    if (!csrfToken || csrfToken === 'ajax:') {
+      throw new Error('No se encontró el CSRF token. Asegurate de estar logueado en LinkedIn.');
+    }
 
-      await fetch(`${callbackUrl}?jobId=${jobId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: companies, done: true }),
+    const headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json, text/plain, */*',
+      'Accept-Language': 'es-419,es;q=0.9,en;q=0.8',
+      'csrf-token': csrfToken,
+      'x-restli-protocol-version': '2.0.0',
+      'x-requested-with': 'XMLHttpRequest',
+      'x-li-lang': 'es_AR',
+      'x-li-track': JSON.stringify({
+        clientVersion: '1.13.9787', mpVersion: '1.13.9787', osName: 'web',
+        timezoneOffset: -3, timezone: 'America/Argentina/Buenos_Aires',
+        deviceFormFactor: 'DESKTOP', mpName: 'sales-navigator-web',
+        displayDensity: 1, displayWidth: 1920, displayHeight: 1080,
+      }),
+      'x-li-page-instance': 'urn:li:page:sales_navigator_lists;' + Math.random().toString(36).slice(2),
+    };
+
+    setStatus(`Creando lista "${listName}"…`);
+
+    let listId = null;
+    const createBodies = [
+      { name: listName, listType: 'ACCOUNT', role: 'OWNER' },
+      { name: listName, listType: 'ACCOUNT' },
+    ];
+
+    for (const body of createBodies) {
+      const createRes = await fetch('/sales-api/salesApiLists', {
+        method: 'POST', credentials: 'include', headers,
+        body: JSON.stringify(body),
       });
+      const responseText = await createRes.text();
+      if (createRes.status === 401 || createRes.status === 403) {
+        throw new Error('Sesión expirada — volvé a loguearte en LinkedIn.');
+      }
+      if (createRes.ok) {
+        try {
+          const created = JSON.parse(responseText);
+          let rawId = created.id ?? created.listId ?? created.entityUrn ?? '';
+          if (typeof rawId === 'string' && rawId.includes(':')) rawId = rawId.split(':').pop();
+          if (rawId && String(rawId) !== 'undefined') { listId = String(rawId); break; }
+        } catch {}
+      }
+      await new Promise(r => setTimeout(r, 300));
+    }
 
-      const withWebsite = companies.filter(c => c.website).length;
-      setStatus(`✅ Listo — ${companies.length} empresas enviadas (${withWebsite} con website)`);
-      setProgress('Podés cerrar esta pestaña.');
-      setTimeout(() => window.close(), 4000);
+    if (!listId) {
+      // Fallback endpoint
+      const altRes = await fetch('/sales-api/salesApiAccountLists', {
+        method: 'POST', credentials: 'include', headers,
+        body: JSON.stringify({ name: listName }),
+      });
+      if (altRes.ok) {
+        try {
+          const created = JSON.parse(await altRes.text());
+          let rawId = created.id ?? created.listId ?? created.entityUrn ?? '';
+          if (typeof rawId === 'string' && rawId.includes(':')) rawId = rawId.split(':').pop();
+          if (rawId && String(rawId) !== 'undefined') listId = String(rawId);
+        } catch {}
+      }
+    }
+
+    if (!listId) throw new Error('No se pudo crear la lista en Sales Navigator.');
+
+    // ── Add companies to the list ─────────────────────────────────────────────
+    let ok = 0, fail = 0;
+    for (let i = 0; i < companyIds.length; i++) {
+      const id = companyIds[i];
+      setStatus(`Agregando empresas… (${i + 1}/${companyIds.length})`);
+      setProgress(`ID: ${id}`);
+      const r = await fetch('/sales-api/salesApiListEntities?action=edit', {
+        method: 'POST', credentials: 'include', headers,
+        body: JSON.stringify({
+          entity: `urn:li:fs_salesCompany:${id}`,
+          addToLists: [listId],
+          removeFromLists: [],
+        }),
+      });
+      if (r.ok) { ok++; } else { fail++; }
+      await new Promise(r => setTimeout(r, 250));
+    }
+
+    setStatus(`✅ Lista creada — ${ok}/${companyIds.length} empresas. Guardando en ProspectOS…`);
+    setProgress('');
+
+    // ── Report back to ProspectOS ─────────────────────────────────────────────
+    const saveRes = await posApiFetch(`${appBase}/api/extension/register-list`, 'POST', {
+      campaignId, listId, listName,
+    });
+
+    if (saveRes?.ok) {
+      setStatus(`✅ Listo — lista "${listName}" registrada. Podés cerrar esta pestaña.`);
+    } else {
+      setStatus(`⚠️ Lista creada pero no se pudo guardar en ProspectOS. Registrala manualmente.`);
+      setProgress(`listId: ${listId}`);
     }
 
   } catch (err) {
-    sessionStorage.removeItem('prospectOS_company_visit');
     setStatus('❌ Error: ' + err.message);
     setProgress('Cerrá esta pestaña y volvé a intentar desde ProspectOS.');
-    console.error('[ProspectOS]', err);
+    console.error('[ProspectOS auto create_account_list]', err);
   }
-  }) // end withScrapeLock('company-visit')
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-function createOverlay() {
-  const overlay = document.createElement('div');
-  overlay.style.cssText = `
-    position:fixed;top:0;left:0;width:100%;height:100%;
-    background:rgba(0,0,0,0.88);z-index:999999;
-    display:flex;flex-direction:column;align-items:center;justify-content:center;
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#fff;gap:16px;
-  `;
-  const title = document.createElement('div');
-  title.style.cssText = 'font-size:18px;font-weight:600;';
-  title.textContent = '⚡ ProspectOS — Scraping en curso';
-  const statusEl = document.createElement('div');
-  statusEl.style.cssText = 'font-size:14px;opacity:0.85;';
-  statusEl.textContent = 'Iniciando…';
-  const progressEl = document.createElement('div');
-  progressEl.style.cssText = 'font-size:12px;opacity:0.6;font-family:monospace;max-width:500px;text-align:center;';
-  overlay.append(title, statusEl, progressEl);
-  document.body.appendChild(overlay);
-  return {
-    setStatus: (msg) => { statusEl.textContent = msg; },
-    setProgress: (msg) => { progressEl.textContent = msg; },
-  };
-}
-
-// Returns all accessible documents: main frame + same-origin iframes
-function getAllDocs() {
-  const docs = [document];
-  document.querySelectorAll('iframe').forEach(iframe => {
-    try { if (iframe.contentDocument) docs.push(iframe.contentDocument); } catch (e) {}
-  });
-  return docs;
-}
-
-function queryShadowAll(selector, root = document) {
-  const results = [];
-  try { results.push(...root.querySelectorAll(selector)); } catch (e) {}
-  // Only traverse shadow roots if nothing found in light DOM (avoids forced reflows)
-  if (results.length > 0) return results;
-  root.querySelectorAll('*').forEach(el => {
-    if (el.shadowRoot) results.push(...queryShadowAll(selector, el.shadowRoot));
-  });
-  return results;
-}
-
-function queryAllDocs(selector) {
-  const results = [];
-  getAllDocs().forEach(doc => {
-    results.push(...queryShadowAll(selector, doc));
-  });
-  return results;
-}
-
-async function waitForSelector(selector, timeout = 10000) {
-  const deadline = Date.now() + timeout;
-  let lastLog = 0;
-  while (Date.now() < deadline) {
-    const now = Date.now();
-    if (now - lastLog >= 5000) {
-      const lightCount = (() => { try { return document.querySelectorAll(selector).length; } catch(e) { return 0; } })();
-      console.log(`[ProspectOS] waitForSelector "${selector}" — light DOM: ${lightCount}, remaining: ${Math.round((deadline - now) / 1000)}s`);
-      lastLog = now;
-    }
-    if (queryAllDocs(selector).length > 0) return;
-    await new Promise(r => setTimeout(r, 500));
-  }
-  throw new Error(`Timeout esperando selector: ${selector}`);
-}
-
-function hasNextPage() {
-  return !!findNextButton();
-}
-
-function findNextButton() {
-  const selectors = [
-    'button[aria-label="Next"]',
-    'button[aria-label="Siguiente"]',
-    '.artdeco-pagination__button--next:not([disabled])',
-    'button.search-results__pagination-next-btn:not([disabled])',
-  ];
-  for (const sel of selectors) {
-    const results = queryAllDocs(sel);
-    const btn = results.find(b => !b.disabled);
-    if (btn) return btn;
-  }
-  return null;
 }
 
 // ── Create client list ────────────────────────────────────────────────────────
@@ -1146,9 +1166,9 @@ async function runCreateClientList(appBaseUrl) {
   try {
     // 1. Fetch company list from ProspectOS
     setStatus('Cargando lista de clientes…');
-    const res = await fetch(`${appBaseUrl}/api/extension/client-companies`);
-    if (!res.ok) throw new Error(`No se pudo cargar la lista (${res.status})`);
-    const { companies } = await res.json();
+    const res = await posApiFetch(`${appBaseUrl}/api/extension/client-companies`);
+    if (!res?.ok) throw new Error(`No se pudo cargar la lista (${res?.status})`);
+    const companies = res?.data?.companies;
     if (!companies || companies.length === 0) throw new Error('No hay empresas en la Lista de clientes. Agregá empresas en Settings primero.');
 
     // 2. Split: already-resolved vs need search navigation
@@ -1364,14 +1384,183 @@ async function doCreateList(resolved, appBaseUrl, { setStatus, setProgress }, to
   }
 
   // Report resolved IDs back to ProspectOS (saves them so next run skips lookup)
-  await fetch(`${appBaseUrl}/api/extension/client-companies`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ results: resolved }),
-  }).catch(() => {});
+  await posApiFetch(`${appBaseUrl}/api/extension/client-companies`, 'POST', { results: resolved }).catch(() => {});
 
   const notFound = totalCount - resolved.length;
   setStatus(`✅ Listo — ${ok}/${resolved.length} empresas agregadas a "${listName}"`);
   setProgress(notFound > 0 ? `${notFound} empresa${notFound > 1 ? 's' : ''} no encontrada${notFound > 1 ? 's' : ''} en Sales Nav` : 'Todas las empresas encontradas ✓');
   setTimeout(() => window.close(), 5000);
+}
+
+async function runCompanyProfileVisit(state) {
+  return withScrapeLock('company-visit', async () => {
+  const { jobId, callbackUrl, companies, currentIndex } = state;
+  const overlay = createOverlay();
+  const { setStatus, setProgress } = overlay;
+
+  try {
+    const company = companies[currentIndex];
+    setStatus(`Capturando website (${currentIndex + 1}/${companies.length})…`);
+    setProgress(company.companyName);
+
+    const numericId = company.id.match(/(\d+)$/)?.[1] || company.id;
+    const storageKey = `__pos_w_${numericId}`;
+
+    // Wait for the SPA to render (body text growing means JS app has started)
+    const pageDeadline = Date.now() + 12000;
+    while (Date.now() < pageDeadline) {
+      if ((document.body?.innerText?.length || 0) > 500) break;
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    const deadline = Date.now() + 12000;
+    let website = '';
+    while (Date.now() < deadline) {
+      // 1. Try interceptor sessionStorage (world: MAIN)
+      website = sessionStorage.getItem(storageKey) || '';
+      // 2. Fallback: deep shadow DOM traversal
+      if (!website) website = extractWebsiteFromDOM();
+      if (website) break;
+      if (/no hemos podido encontrar|page not found/i.test(document.body?.innerText || '')) break;
+      await new Promise(r => setTimeout(r, 600));
+    }
+
+    sessionStorage.removeItem(storageKey);
+    companies[currentIndex].website = website;
+    console.log('[ProspectOS]', company.companyName, '→', website || '(no website)');
+
+    const nextIndex = currentIndex + 1;
+
+    if (nextIndex < companies.length) {
+      sessionStorage.setItem('prospectOS_company_visit', JSON.stringify({
+        ...state,
+        companies,
+        currentIndex: nextIndex,
+      }));
+      window.location.href = `https://www.linkedin.com/sales/company/${companies[nextIndex].id}`;
+    } else {
+      sessionStorage.removeItem('prospectOS_company_visit');
+      setStatus(`Enviando ${companies.length} empresas a ProspectOS…`);
+      setProgress('');
+
+      await posApiFetch(`${callbackUrl}?jobId=${jobId}`, 'POST', { items: companies, done: true });
+
+      const withWebsite = companies.filter(c => c.website).length;
+      setStatus(`✅ Listo — ${companies.length} empresas enviadas (${withWebsite} con website)`);
+      setProgress('Podés cerrar esta pestaña.');
+      setTimeout(() => window.close(), 4000);
+    }
+
+  } catch (err) {
+    sessionStorage.removeItem('prospectOS_company_visit');
+    setStatus('❌ Error: ' + err.message);
+    setProgress('Cerrá esta pestaña y volvé a intentar desde ProspectOS.');
+    console.error('[ProspectOS]', err);
+  }
+  }) // end withScrapeLock('company-visit')
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function createOverlay() {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = `
+    position:fixed;top:0;left:0;width:100%;height:100%;
+    background:rgba(0,0,0,0.88);z-index:999999;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#fff;gap:16px;
+  `;
+  const title = document.createElement('div');
+  title.style.cssText = 'font-size:18px;font-weight:600;';
+  title.textContent = '⚡ ProspectOS — Scraping en curso';
+  const statusEl = document.createElement('div');
+  statusEl.style.cssText = 'font-size:14px;opacity:0.85;';
+  statusEl.textContent = 'Iniciando…';
+  const progressEl = document.createElement('div');
+  progressEl.style.cssText = 'font-size:12px;opacity:0.6;font-family:monospace;max-width:500px;text-align:center;';
+  overlay.append(title, statusEl, progressEl);
+  document.body.appendChild(overlay);
+  return {
+    setStatus: (msg) => { statusEl.textContent = msg; },
+    setProgress: (msg) => { progressEl.textContent = msg; },
+  };
+}
+
+// ── ProspectOS API helper ─────────────────────────────────────────────────────
+// Routes all requests to our server through the background service worker,
+// bypassing LinkedIn's page-level CSP and mixed-content restrictions.
+function posApiFetch(url, method = 'GET', body = undefined) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: 'pos_fetch', url, method, body }, (res) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message || 'Extension messaging error'));
+        return;
+      }
+      resolve(res ?? { ok: false, status: 0, error: 'No response' });
+    });
+  });
+}
+
+// Returns all accessible documents: main frame + same-origin iframes
+function getAllDocs() {
+  const docs = [document];
+  document.querySelectorAll('iframe').forEach(iframe => {
+    try { if (iframe.contentDocument) docs.push(iframe.contentDocument); } catch (e) {}
+  });
+  return docs;
+}
+
+function queryShadowAll(selector, root = document) {
+  const results = [];
+  try { results.push(...root.querySelectorAll(selector)); } catch (e) {}
+  // Only traverse shadow roots if nothing found in light DOM (avoids forced reflows)
+  if (results.length > 0) return results;
+  root.querySelectorAll('*').forEach(el => {
+    if (el.shadowRoot) results.push(...queryShadowAll(selector, el.shadowRoot));
+  });
+  return results;
+}
+
+function queryAllDocs(selector) {
+  const results = [];
+  getAllDocs().forEach(doc => {
+    results.push(...queryShadowAll(selector, doc));
+  });
+  return results;
+}
+
+async function waitForSelector(selector, timeout = 10000) {
+  const deadline = Date.now() + timeout;
+  let lastLog = 0;
+  while (Date.now() < deadline) {
+    const now = Date.now();
+    // Log progress every 5 s so DevTools shows what's happening
+    if (now - lastLog >= 5000) {
+      const lightCount = (() => { try { return document.querySelectorAll(selector).length; } catch(e) { return 0; } })();
+      console.log(`[ProspectOS] waitForSelector "${selector}" — light DOM: ${lightCount}, remaining: ${Math.round((deadline - now) / 1000)}s`);
+      lastLog = now;
+    }
+    if (queryAllDocs(selector).length > 0) return;
+    await new Promise(r => setTimeout(r, 500));
+  }
+  throw new Error(`Timeout esperando selector: ${selector}`);
+}
+
+function hasNextPage() {
+  return !!findNextButton();
+}
+
+function findNextButton() {
+  const selectors = [
+    'button[aria-label="Next"]',
+    'button[aria-label="Siguiente"]',
+    '.artdeco-pagination__button--next:not([disabled])',
+    'button.search-results__pagination-next-btn:not([disabled])',
+  ];
+  for (const sel of selectors) {
+    const results = queryAllDocs(sel);
+    const btn = results.find(b => !b.disabled);
+    if (btn) return btn;
+  }
+  return null;
 }

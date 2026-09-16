@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation"
 import { REPS as BASE_REPS, INDUSTRIES } from "@/lib/reps"
 const REPS = ["Todos", ...BASE_REPS]
 const REP_OPTIONS = BASE_REPS
-import { Plus, Pencil, Trash2, Building2, Users, Send, Mail, ChevronLeft, ChevronRight, LayoutList, CalendarDays, CalendarIcon, BarChart3, ChevronsUpDown, Check, Zap, ChevronDown } from "lucide-react"
+import { Plus, Pencil, Trash2, Building2, Users, Send, Mail, ChevronLeft, ChevronRight, LayoutList, CalendarDays, CalendarIcon, BarChart3, ChevronsUpDown, Check, Zap, ChevronDown, TrendingUp } from "lucide-react"
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from "recharts"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
@@ -37,7 +37,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { createCampaign, updateCampaign, deleteCampaign, getWeekStats, createAutoCampaign, getSavedUrlsForWizard, getDistributionTemplatesForWizard, type IcpStat, type IcpCategoryStat, type AutoCampaignConfig } from "./actions"
+import { createCampaign, updateCampaign, deleteCampaign, getWeekStats, createAutoCampaign, getSavedUrlsForWizard, getDistributionTemplatesForWizard, type IcpStat, type IcpCategoryStat, type AutoCampaignConfig, type WeekScorecardRow, type MeetingProspect } from "./actions"
 
 function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10)
@@ -758,9 +758,347 @@ function ChartsView({ campaigns, icpStats, icpCategoryStats }: { campaigns: Camp
   )
 }
 
-export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats, campaignIndustries = [], autoActionMap = {} }: { initialCampaigns: Campaign[]; icpStats: IcpStat[]; icpCategoryStats: IcpCategoryStat[]; campaignIndustries?: string[]; autoActionMap?: Record<string, { autoStatus: string; jobUrl: string | null }> }) {
+// ── Scorecard ─────────────────────────────────────────────────────────────────
+
+const REPS_SCORECARD = ["Todos", ...BASE_REPS]
+
+function pct(num: number, den: number): string {
+  if (den === 0) return "—"
+  return `${((num / den) * 100).toFixed(1)}%`
+}
+
+type NormalizedWeek = {
+  isoKey: string   // "2026-W25" — used for sort + dedup
+  label: string    // "22 Jun" — used for display
+  scraped: number
+  shortlisted: number
+  enriched: number
+  enviados: number
+  reuniones: number        // SQL+ only
+  reuniones_total: number  // all active deals
+}
+
+type MetricKey = "scraped" | "shortlisted" | "enriched" | "enviados" | "reuniones_total" | "reuniones"
+
+const METRIC_META: Record<MetricKey, { label: string; chartKey: string; color: string }> = {
+  scraped:         { label: "Scraped",          chartKey: "Scraped",         color: "#94a3b8" },
+  shortlisted:     { label: "Shortlist",         chartKey: "Shortlist",       color: "#60a5fa" },
+  enriched:        { label: "Con Email",         chartKey: "Con Email",       color: "#f59e0b" },
+  enviados:        { label: "Enviados",          chartKey: "Enviados",        color: "#a78bfa" },
+  reuniones_total: { label: "Total Reuniones",   chartKey: "Total Reun.",     color: "#10b981" },
+  reuniones:       { label: "Reuniones SQL",     chartKey: "SQL",             color: "#34d399" },
+}
+
+function ScorecardView({ data, meetings = [] }: { data: WeekScorecardRow[]; meetings?: MeetingProspect[] }) {
+  const [selectedWeek, setSelectedWeek] = useState<string | null>(null)
+  const [metricFilter, setMetricFilter] = useState<MetricKey | null>(null)
+  const meetingsRef = useRef<HTMLDivElement>(null)
+
+  function handleWeekClick(isoKey: string) {
+    setSelectedWeek(prev => prev === isoKey ? null : isoKey)
+    setTimeout(() => meetingsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50)
+  }
+
+  // Aggregate by iso_week.
+  // scraped: sum for the selected rep (or all reps)
+  // shortlisted/enriched/etc: team totals — stored identically on every rep row,
+  //   so we take the value from the FIRST row seen for each iso_week.
+  const weeks = useMemo(() => {
+    const map = new Map<string, NormalizedWeek>()
+
+    for (const row of data) {
+      const date = parseCampaignDate(row.week_label)
+      if (!date) continue
+      const { key, monday } = getISOWeekInfo(date)
+      const label = `${monday.getDate()} ${MONTHS[monday.getMonth()]}`
+
+      if (!map.has(key)) {
+        // First time we see this week: seed metrics from this row (team totals)
+        map.set(key, {
+          isoKey: key,
+          label,
+          scraped: 0,
+          shortlisted:     row.shortlisted,
+          enriched:        row.enriched,
+          enviados:        row.enviados,
+          reuniones:       row.reuniones,
+          reuniones_total: row.reuniones_total ?? 0,
+        })
+      }
+
+      const entry = map.get(key)!
+      entry.scraped += row.scraped
+    }
+
+    return Array.from(map.values()).sort((a, b) => b.isoKey.localeCompare(a.isoKey))
+  }, [data])
+
+  // KPI totals
+  const totals = useMemo(() => weeks.reduce(
+    (acc, w) => ({
+      scraped:         acc.scraped         + w.scraped,
+      shortlisted:     acc.shortlisted     + w.shortlisted,
+      enriched:        acc.enriched        + w.enriched,
+      enviados:        acc.enviados        + w.enviados,
+      reuniones:       acc.reuniones       + w.reuniones,
+      reuniones_total: acc.reuniones_total + w.reuniones_total,
+    }),
+    { scraped: 0, shortlisted: 0, enriched: 0, enviados: 0, reuniones: 0, reuniones_total: 0 }
+  ), [weeks])
+
+  // Chart — oldest first (left → right), all metrics included for filtering
+  const chartData = useMemo(() =>
+    [...weeks].reverse().map((w) => ({
+      name:          w.label,
+      Scraped:       w.scraped,
+      Shortlist:     w.shortlisted,
+      "Con Email":   w.enriched,
+      Enviados:      w.enviados,
+      "Total Reun.": w.reuniones_total,
+      SQL:           w.reuniones,
+    })),
+    [weeks]
+  )
+
+  // Which bar series to show in chart
+  const activeMetrics: MetricKey[] = metricFilter
+    ? [metricFilter]
+    : ["scraped", "enviados", "reuniones"]
+
+  const hasData = weeks.length > 0
+
+  return (
+    <div className="space-y-4">
+      {/* KPI summary cards — click to filter chart */}
+      {(() => {
+        const seen = new Set<string>()
+        const deduped = meetings.filter((m) => {
+          if (!m.email) return true
+          const k = m.email.toLowerCase()
+          if (seen.has(k)) return false
+          seen.add(k); return true
+        })
+        const sqlCount = new Set(deduped.map(m => m.email?.split("@")[1]?.toLowerCase() ?? m.company_name?.toLowerCase() ?? m.id)).size
+        const kpis: { key: MetricKey; value: number }[] = [
+          { key: "scraped",         value: totals.scraped },
+          { key: "shortlisted",     value: totals.shortlisted },
+          { key: "enriched",        value: totals.enriched },
+          { key: "enviados",        value: totals.enviados },
+          { key: "reuniones_total", value: totals.reuniones_total },
+          { key: "reuniones",       value: sqlCount },
+        ]
+        return (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+            {kpis.map(({ key, value }) => {
+              const meta = METRIC_META[key]
+              const active = metricFilter === key
+              return (
+                <Card
+                  key={key}
+                  className={`cursor-pointer transition-all ${active ? "ring-2 ring-offset-1" : "hover:bg-muted/30"}`}
+                  style={active ? { outline: `2px solid ${meta.color}`, outlineOffset: "2px" } : {}}
+                  onClick={() => setMetricFilter(prev => prev === key ? null : key)}
+                >
+                  <CardContent className="px-4 py-3">
+                    <p className="text-xs text-muted-foreground flex items-center gap-1">
+                      {active && <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ background: meta.color }} />}
+                      {meta.label}
+                    </p>
+                    <p className="text-2xl font-bold tabular-nums">{value.toLocaleString("es")}</p>
+                  </CardContent>
+                </Card>
+              )
+            })}
+          </div>
+        )
+      })()}
+
+      {/* Bar chart */}
+      {hasData && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">
+              Evolución semanal
+              {metricFilter && (
+                <span className="ml-2 text-xs font-normal" style={{ color: METRIC_META[metricFilter].color }}>
+                  — {METRIC_META[metricFilter].label}
+                </span>
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={chartData} margin={{ top: 4, right: 8, left: -16, bottom: 4 }}>
+                <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
+                <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} />
+                <Tooltip contentStyle={{ fontSize: 12 }} />
+                {activeMetrics.length > 1 && <Legend wrapperStyle={{ fontSize: 12 }} />}
+                {activeMetrics.map(k => (
+                  <Bar key={k} dataKey={METRIC_META[k].chartKey} name={METRIC_META[k].label} fill={METRIC_META[k].color} radius={[2, 2, 0, 0]} />
+                ))}
+              </BarChart>
+            </ResponsiveContainer>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Funnel table */}
+      {hasData ? (
+        <Card>
+          <CardContent className="p-0">
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Semana</TableHead>
+                    <TableHead className="text-right">Scraped</TableHead>
+                    <TableHead className="text-right">Shortlist</TableHead>
+                    <TableHead className="text-right">Con Email</TableHead>
+                    <TableHead className="text-right">Enviados</TableHead>
+                    <TableHead className="text-right">Total Reun.</TableHead>
+                    <TableHead className="text-right">SQL</TableHead>
+                    <TableHead className="text-right">Conv%</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {weeks.map((w) => (
+                    <TableRow key={w.isoKey}>
+                      <TableCell className="font-medium">{w.label}</TableCell>
+                      <TableCell className="text-right tabular-nums">{w.scraped.toLocaleString("es")}</TableCell>
+                      <TableCell className="text-right tabular-nums">{w.shortlisted.toLocaleString("es")}</TableCell>
+                      <TableCell className="text-right tabular-nums">{w.enriched.toLocaleString("es")}</TableCell>
+                      <TableCell className="text-right tabular-nums">{w.enviados.toLocaleString("es")}</TableCell>
+                      <TableCell
+                        className={`text-right tabular-nums ${w.reuniones_total > 0 ? "cursor-pointer hover:text-blue-400 underline underline-offset-2" : ""} ${selectedWeek === w.isoKey ? "text-blue-400 font-semibold" : ""}`}
+                        onClick={() => w.reuniones_total > 0 && handleWeekClick(w.isoKey)}
+                      >{w.reuniones_total.toLocaleString("es")}</TableCell>
+                      <TableCell className="text-right tabular-nums font-semibold">{w.reuniones.toLocaleString("es")}</TableCell>
+                      <TableCell className={`text-right tabular-nums text-xs ${w.reuniones > 0 ? "text-emerald-600 font-semibold" : "text-muted-foreground"}`}>
+                        {pct(w.reuniones, w.enviados)}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      ) : (
+        <p className="text-sm text-muted-foreground text-center py-8">
+          Sin datos todavía — empezá a cargar campañas y la conversión aparece acá.
+        </p>
+      )}
+
+      {/* Meetings detail — grouped by week → company */}
+      {meetings.length > 0 && (() => {
+        // 1. Dedup by email
+        const seenEmails = new Set<string>()
+        const dedupedMeetings = meetings.filter((m) => {
+          if (!m.email) return true
+          const k = m.email.toLowerCase()
+          if (seenEmails.has(k)) return false
+          seenEmails.add(k); return true
+        })
+
+        // 2. Helpers
+        function mIsoKey(m: MeetingProspect): string {
+          const { key } = getISOWeekInfo(new Date(m.created_at))
+          return key
+        }
+        function mWeekLabel(m: MeetingProspect): string {
+          const { monday } = getISOWeekInfo(new Date(m.created_at))
+          return `${monday.getDate()} ${MONTHS[monday.getMonth()]}`
+        }
+        function domainKey(m: MeetingProspect): string {
+          return m.email?.split("@")[1]?.toLowerCase() ?? m.company_name?.toLowerCase() ?? m.id
+        }
+        function coLabel(prospects: MeetingProspect[], dk: string): string {
+          const names = prospects.map(p => p.company_name).filter(Boolean) as string[]
+          if (names.length > 0) return names.reduce((a, b) => a.length <= b.length ? a : b)
+          return (dk.split(".")[0].charAt(0).toUpperCase() + dk.split(".")[0].slice(1))
+        }
+
+        // 3. Filter by selected week
+        const filtered = selectedWeek
+          ? dedupedMeetings.filter(m => mIsoKey(m) === selectedWeek)
+          : dedupedMeetings
+
+        // 4. Group: week → domain → prospects
+        type WeekGroup = { label: string; companies: Map<string, { label: string; prospects: MeetingProspect[] }> }
+        const byWeek = new Map<string, WeekGroup>()
+        for (const m of filtered) {
+          const wk = mIsoKey(m)
+          if (!byWeek.has(wk)) byWeek.set(wk, { label: mWeekLabel(m), companies: new Map() })
+          const wg = byWeek.get(wk)!
+          const dk = domainKey(m)
+          if (!wg.companies.has(dk)) wg.companies.set(dk, { label: "", prospects: [] })
+          wg.companies.get(dk)!.prospects.push(m)
+        }
+        // Resolve company labels after grouping
+        for (const wg of byWeek.values())
+          for (const [dk, co] of wg.companies) co.label = coLabel(co.prospects, dk)
+
+        const totalCompanies = new Set(dedupedMeetings.map(domainKey)).size
+
+        return (
+          <div ref={meetingsRef}><Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium flex items-center gap-2">
+                <span className="inline-block w-2 h-2 rounded-full bg-emerald-500" />
+                Reuniones agendadas ({totalCompanies})
+                {selectedWeek && (
+                  <button
+                    onClick={() => setSelectedWeek(null)}
+                    className="ml-auto text-xs text-blue-400 hover:underline font-normal"
+                  >
+                    Semana {weeks.find(w => w.isoKey === selectedWeek)?.label} · Ver todas
+                  </button>
+                )}
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="p-0">
+              {Array.from(byWeek.entries()).map(([wk, { label: wLabel, companies }]) => (
+                <div key={wk}>
+                  <div className="px-4 py-2 bg-muted/30 border-y text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                    Semana {wLabel}
+                  </div>
+                  <div className="divide-y">
+                    {Array.from(companies.entries()).map(([dk, { label: cLabel, prospects: contacts }]) => (
+                      <div key={dk} className="px-4 py-3">
+                        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">{cLabel}</p>
+                        <div className="space-y-2">
+                          {contacts.map((m) => (
+                            <div key={m.id} className="flex items-center gap-4 text-sm">
+                              <span className="font-medium min-w-[180px]">
+                                {m.full_name ?? (`${m.first_name ?? ""} ${m.last_name ?? ""}`.trim() || "—")}
+                              </span>
+                              <span className="text-muted-foreground min-w-[180px]">{m.job_title ?? "—"}</span>
+                              <span className="text-muted-foreground">{m.email ?? "—"}</span>
+                              {m.linkedin_url && (
+                                <a href={m.linkedin_url} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline text-xs ml-auto shrink-0">
+                                  Ver perfil
+                                </a>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </CardContent>
+          </Card></div>
+        )
+      })()}
+    </div>
+  )
+}
+
+export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats, campaignIndustries = [], autoActionMap = {}, scorecardData = [], meetingProspects = [] }: { initialCampaigns: Campaign[]; icpStats: IcpStat[]; icpCategoryStats: IcpCategoryStat[]; campaignIndustries?: string[]; autoActionMap?: Record<string, { autoStatus: string; jobUrl: string | null }>; scorecardData?: WeekScorecardRow[]; meetingProspects?: MeetingProspect[] }) {
   const [campaigns, setCampaigns] = useState<Campaign[]>(initialCampaigns)
-  const [view, setView] = useState<"week" | "list" | "charts">("week")
+  const [view, setView] = useState<"week" | "list" | "charts" | "scorecard">("week")
   const [selectedWeek, setSelectedWeek] = useState(() => getWeekMonday(new Date()))
   const [weekStats, setWeekStats] = useState<{ validEmails: number; scoreGte5: number; sent: number } | null>(null)
   const [, startWeekStats] = useTransition()
@@ -788,7 +1126,6 @@ export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats, 
   const [autoForm, setAutoForm] = useState<AutoForm>(emptyAutoForm())
   const [savedUrls, setSavedUrls] = useState<SavedUrl[]>([])
   const [distTemplates, setDistTemplates] = useState<DistributionTemplate[]>([])
-  const [autoError, setAutoError] = useState<string | null>(null)
   const [csUrlOpen, setCsUrlOpen] = useState(false)
   const [psUrlOpen, setPsUrlOpen] = useState(false)
 
@@ -876,44 +1213,38 @@ export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats, 
   function handleSaveAuto() {
     if (!form.rep_name || !form.industry || !form.week_label) return
     if (!autoForm.company_search_url || !autoForm.people_search_url) return
-    setAutoError(null)
     startTransition(async () => {
-      try {
-        const scheduledAt = new Date().toISOString()
-        const config: AutoCampaignConfig = {
-          company_search_url: autoForm.company_search_url,
-          company_count: autoForm.company_count,
-          exclude_previous: autoForm.exclude_previous,
-          exclusion_date_from: autoForm.exclusion_date_from || null,
-          exclusion_date_to: autoForm.exclusion_date_to || null,
-          start_page: autoForm.start_page,
-          people_search_url: autoForm.people_search_url,
-          people_count: autoForm.people_count,
-          enrich_emails: autoForm.enrich_emails,
-          enrich_phones: autoForm.enrich_phones,
-          classify_icp: autoForm.classify_icp,
-          normalize_names: autoForm.normalize_names,
-          shortlist_icp_min: autoForm.auto_shortlist ? autoForm.shortlist_icp_min : null,
-          shortlist_title_keywords: autoForm.auto_shortlist ? autoForm.shortlist_title_keywords || null : null,
-          distribution_template_id: autoForm.distribution_template_id || null,
-          distribution_template_name: autoForm.distribution_template_name || null,
-          scheduled_at: scheduledAt,
-        }
-        const result = await createAutoCampaign(form, config)
-        if ("error" in result) { setAutoError(result.error); return }
-        const newCampaign: Campaign = {
-          id: result.id,
-          ...form,
-          status: "pending",
-          accounts_found: 0,
-          prospects_found: 0,
-          prospects_sent: 0,
-        }
-        setCampaigns((prev) => [newCampaign, ...prev])
-        setDialogOpen(false)
-      } catch (err) {
-        setAutoError(err instanceof Error ? err.message : String(err))
+      const scheduledAt = new Date().toISOString()
+      const config: AutoCampaignConfig = {
+        company_search_url: autoForm.company_search_url,
+        company_count: autoForm.company_count,
+        exclude_previous: autoForm.exclude_previous,
+        exclusion_date_from: autoForm.exclusion_date_from || null,
+        exclusion_date_to: autoForm.exclusion_date_to || null,
+        start_page: autoForm.start_page,
+        people_search_url: autoForm.people_search_url,
+        people_count: autoForm.people_count,
+        enrich_emails: autoForm.enrich_emails,
+        enrich_phones: autoForm.enrich_phones,
+        classify_icp: autoForm.classify_icp,
+        normalize_names: autoForm.normalize_names,
+        shortlist_icp_min: autoForm.auto_shortlist ? autoForm.shortlist_icp_min : null,
+        shortlist_title_keywords: autoForm.auto_shortlist ? autoForm.shortlist_title_keywords || null : null,
+        distribution_template_id: autoForm.distribution_template_id || null,
+        distribution_template_name: autoForm.distribution_template_name || null,
+        scheduled_at: scheduledAt,
       }
+      const newId = await createAutoCampaign(form, config)
+      const newCampaign: Campaign = {
+        id: newId,
+        ...form,
+        status: "pending",
+        accounts_found: 0,
+        prospects_found: 0,
+        prospects_sent: 0,
+      }
+      setCampaigns((prev) => [newCampaign, ...prev])
+      setDialogOpen(false)
     })
   }
 
@@ -949,10 +1280,17 @@ export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats, 
             </button>
             <button
               onClick={() => setView("charts")}
-              className={`px-2.5 py-1.5 rounded-r-md border-l transition-colors ${view === "charts" ? "bg-foreground text-background" : "hover:bg-muted/50"}`}
+              className={`px-2.5 py-1.5 border-l transition-colors ${view === "charts" ? "bg-foreground text-background" : "hover:bg-muted/50"}`}
               title="Analytics"
             >
               <BarChart3 className="size-4" />
+            </button>
+            <button
+              onClick={() => setView("scorecard")}
+              className={`px-2.5 py-1.5 rounded-r-md border-l transition-colors ${view === "scorecard" ? "bg-foreground text-background" : "hover:bg-muted/50"}`}
+              title="Scorecard"
+            >
+              <TrendingUp className="size-4" />
             </button>
           </div>
           <Button onClick={openCreate} disabled={isPending}>
@@ -1038,6 +1376,7 @@ export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats, 
 
       {view === "week" && <WeeklyView campaigns={weekCampaigns} autoActionMap={autoActionMap} />}
       {view === "charts" && <ChartsView campaigns={campaigns} icpStats={icpStats} icpCategoryStats={icpCategoryStats} />}
+      {view === "scorecard" && <ScorecardView data={scorecardData} meetings={meetingProspects} />}
 
       {view === "list" && <Tabs defaultValue="Todos">
         <TabsList>
@@ -1486,11 +1825,6 @@ export function DashboardClient({ initialCampaigns, icpStats, icpCategoryStats, 
               </Button>
             )}
           </DialogFooter>
-          {autoError && (
-            <div className="px-6 pb-4 text-sm text-red-500 bg-red-50 dark:bg-red-950/20 rounded-b-lg">
-              Error: {autoError}
-            </div>
-          )}
         </DialogContent>
       </Dialog>
     </div>

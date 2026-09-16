@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react"
 import {
   Loader2, Send, X, RefreshCw, Copy, Check, ExternalLink,
-  MessageSquare, Mail, ChevronDown, ChevronRight, Inbox,
+  MessageSquare, Mail, ChevronDown, ChevronRight, Inbox, Sparkles,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -160,7 +160,7 @@ function DetailPanel({ reply, onStatusChange }: { reply: ProspectReply; onStatus
 
   const p = reply.prospects
   const intent = reply.intent ? INTENT_CFG[reply.intent] : null
-  const isLoading = reply.status === "pending_review" && !reply.ai_draft
+  const noDraft = !reply.ai_draft && !draft
   const canSend = reply.source === "smartlead" && reply.reply_message_id
 
   function handleSend() {
@@ -190,7 +190,8 @@ function DetailPanel({ reply, onStatusChange }: { reply: ProspectReply; onStatus
   function handleRegen() {
     setAction("regen")
     startTransition(async () => {
-      await regenerateDraft(reply.id)
+      const updated = await regenerateDraft(reply.id)
+      if (updated?.ai_draft) setDraft(updated.ai_draft)
       setAction(null)
     })
   }
@@ -260,19 +261,31 @@ function DetailPanel({ reply, onStatusChange }: { reply: ProspectReply; onStatus
             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
               Borrador IA
             </span>
-            <button
-              onClick={handleRegen}
-              disabled={isPending}
-              className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
-            >
-              {action === "regen" ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
-              Regenerar
-            </button>
+            {!noDraft && (
+              <button
+                onClick={handleRegen}
+                disabled={isPending}
+                className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+              >
+                {action === "regen" ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
+                Regenerar
+              </button>
+            )}
           </div>
 
-          {isLoading ? (
-            <div className="rounded-lg border bg-muted/20 px-4 py-8 flex items-center justify-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="size-4 animate-spin" /> Generando borrador…
+          {noDraft ? (
+            <div className="rounded-lg border bg-muted/20 px-4 py-8 flex flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
+              <p className="text-center text-xs">El borrador no fue generado automáticamente.</p>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleRegen}
+                disabled={action === "regen"}
+              >
+                {action === "regen"
+                  ? <><Loader2 className="mr-2 size-3.5 animate-spin" /> Generando…</>
+                  : <><Sparkles className="mr-2 size-3.5" /> Generar borrador IA</>}
+              </Button>
             </div>
           ) : (
             <textarea
@@ -280,7 +293,7 @@ function DetailPanel({ reply, onStatusChange }: { reply: ProspectReply; onStatus
               onChange={(e) => setDraft(e.target.value)}
               disabled={reply.status === "sent" || reply.status === "dismissed"}
               rows={10}
-              placeholder="El borrador aparecerá aquí cuando la IA termine de analizar la respuesta…"
+              placeholder="El borrador aparecerá aquí…"
               className="w-full rounded-lg border bg-background px-4 py-3 text-sm leading-relaxed resize-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 disabled:cursor-not-allowed"
             />
           )}
@@ -298,7 +311,7 @@ function DetailPanel({ reply, onStatusChange }: { reply: ProspectReply; onStatus
             <Button
               size="sm"
               onClick={handleSend}
-              disabled={isPending || !draft.trim() || isLoading}
+              disabled={isPending || !draft.trim() || noDraft}
             >
               {action === "send" ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Send className="mr-2 size-4" />}
               Enviar respuesta

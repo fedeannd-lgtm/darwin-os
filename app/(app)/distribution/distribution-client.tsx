@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useTransition, useEffect } from "react"
+import { cn } from "@/lib/utils"
 import { Plus, Play, Copy, Trash2, ChevronUp, ChevronDown, X, Loader2, CheckCircle2, AlertCircle, RotateCcw, Eye } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -20,12 +21,13 @@ import { saveTemplate, cloneTemplate, deleteTemplate, runDistribution, getRunsFo
 const FIELD_LABELS: Record<string, string> = {
   has_email: "Tiene email", email_status: "Estado email", icp_score: "ICP Score",
   os_score: "OS Score", icp_category: "Categoría", is_premium: "Premium", connection_degree: "Grado",
-  started_role_months: "Mes inicio",
+  started_role_months: "Mes inicio", shortlisted: "En shortlist",
 }
 const OP_LABELS: Record<string, string> = { eq: "=", neq: "≠", gte: "≥", lte: "≤" }
 const VALUE_LABELS: Record<string, Record<string, string>> = {
   has_email: { true: "Sí", false: "No" },
   is_premium: { true: "Sí", false: "No" },
+  shortlisted: { true: "Sí", false: "No" },
   connection_degree: { FIRST: "1°", SECOND: "2°", THIRD: "3°" },
   email_status: { valid: "Válido", "catch-all": "Catch-all", invalid: "Inválido", unknown: "Desconocido" },
 }
@@ -219,6 +221,7 @@ const CONDITION_FIELDS = [
   { value: "is_premium", label: "Premium LinkedIn" },
   { value: "connection_degree", label: "Grado conexión" },
   { value: "started_role_months", label: "Mes de inicio (meses)" },
+  { value: "shortlisted", label: "En shortlist" },
 ]
 
 const OPERATORS_FOR_FIELD: Record<string, { value: string; label: string }[]> = {
@@ -230,6 +233,7 @@ const OPERATORS_FOR_FIELD: Record<string, { value: string; label: string }[]> = 
   is_premium: [{ value: "eq", label: "=" }],
   connection_degree: [{ value: "eq", label: "=" }],
   started_role_months: [{ value: "gte", label: ">=" }, { value: "lte", label: "<=" }, { value: "eq", label: "=" }],
+  shortlisted: [{ value: "eq", label: "=" }],
 }
 
 const VALUES_FOR_FIELD: Record<string, { value: string; label: string }[] | null> = {
@@ -256,6 +260,7 @@ const VALUES_FOR_FIELD: Record<string, { value: string; label: string }[] | null
     { value: "THIRD", label: "3er grado" },
   ],
   started_role_months: null,
+  shortlisted: [{ value: "true", label: "Sí (en shortlist)" }, { value: "false", label: "No (no shortlisted)" }],
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -702,6 +707,7 @@ function TemplateEditor({ template, campaigns, onSaved, onClose }: {
   const isNew = !template?.id
   const [name, setName] = useState(template?.name ?? "")
   const [industry, setIndustry] = useState(template?.industry ?? "")
+  const [shortlistFilter, setShortlistFilter] = useState<"all" | "only" | "exclude">(template?.shortlist_filter ?? "all")
   const [routes, setRoutes] = useState<DistributionRoute[]>(template?.routes ?? [])
   const [saving, startSave] = useTransition()
   const [running, startRun] = useTransition()
@@ -760,7 +766,7 @@ function TemplateEditor({ template, campaigns, onSaved, onClose }: {
 
   function handleSave() {
     startSave(async () => {
-      const id = await saveTemplate({ id: template?.id, name, industry: industry || null, notes: null, routes })
+      const id = await saveTemplate({ id: template?.id, name, industry: industry || null, notes: null, shortlist_filter: shortlistFilter, routes })
       onSaved(id)
     })
   }
@@ -801,12 +807,34 @@ function TemplateEditor({ template, campaigns, onSaved, onClose }: {
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
-          <Input
-            className="text-xs border-0 px-0 h-6 focus-visible:ring-0 text-muted-foreground"
-            placeholder="Industria (opcional)"
-            value={industry}
-            onChange={(e) => setIndustry(e.target.value)}
-          />
+          <div className="flex items-center gap-3">
+            <Input
+              className="text-xs border-0 px-0 h-6 focus-visible:ring-0 text-muted-foreground flex-1"
+              placeholder="Industria (opcional)"
+              value={industry}
+              onChange={(e) => setIndustry(e.target.value)}
+            />
+            <div className="flex items-center gap-1 shrink-0">
+              <span className="text-[10px] text-muted-foreground">Shortlist:</span>
+              <div className="flex rounded border overflow-hidden text-[10px]">
+                {(["all", "only", "exclude"] as const).map((opt) => (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => setShortlistFilter(opt)}
+                    className={cn(
+                      "px-1.5 py-0.5 transition-colors",
+                      shortlistFilter === opt
+                        ? "bg-primary text-primary-foreground font-medium"
+                        : "hover:bg-muted/50 text-muted-foreground"
+                    )}
+                  >
+                    {opt === "all" ? "Todos" : opt === "only" ? "Solo" : "Sin"}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" onClick={() => setShowPreview(true)} disabled={routes.length === 0} title="Vista previa del flujo">

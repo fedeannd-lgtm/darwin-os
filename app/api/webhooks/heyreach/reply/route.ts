@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { after } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
-import { analyzeReply } from "@/lib/ai-reply"
 
 export async function POST(req: NextRequest) {
   const secret = req.nextUrl.searchParams.get("secret")
@@ -16,57 +14,82 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 })
   }
 
-  // HeyReach sends eventType like "First Message Reply Received"
-  // Accept any event that contains "reply" in the name (case-insensitive)
-  // or has no event type (don't skip unknown events with body)
-  const eventType = String(body.eventType ?? body.event_type ?? body.type ?? "")
+  // event_type = "every_message_reply_received"
+  const eventType = String(body.event_type ?? body.eventType ?? body.type ?? "")
   if (eventType && !eventType.toLowerCase().includes("reply")) {
     return NextResponse.json({ ok: true, skipped: true })
   }
 
-  const leadId = String(body.leadId ?? body.lead_id ?? "")
-  const campaignId = String(body.campaignId ?? body.campaign_id ?? "")
-  const replyBody = String(body.messageBody ?? body.message ?? body.body ?? body.replyText ?? "")
-  const replyMessageId = String(body.messageId ?? body.message_id ?? "")
-  const repliedAt = String(body.createdAt ?? body.created_at ?? body.timestamp ?? new Date().toISOString())
-  const senderFirstName = String(body.firstName ?? body.first_name ?? "")
-  const senderLastName = String(body.lastName ?? body.last_name ?? "")
-  const senderName = [senderFirstName, senderLastName].filter(Boolean).join(" ")
-  const profileUrl = String(body.profileUrl ?? body.linkedin_url ?? "")
+  // ── Extract fields from HeyReach payload structure ───────────────────────────
+
+  // Message body: lives in recent_messages[].message where is_reply: true
+  type HrMessage = { message?: string; is_reply?: boolean; message_type?: string }
+  const recentMessages: HrMessage[] = Array.isArray(body.recent_messages)
+    ? (body.recent_messages as HrMessage[])
+    : []
+  const replyBody = recentMessages
+    .filter((m) => m.is_reply && m.message && m.message.trim() && !m.message_type)
+    .map((m) => m.message!)
+    .join("\n")
+    .trim()
 
   if (!replyBody) {
     return NextResponse.json({ ok: true, skipped: true, reason: "empty body" })
   }
 
-  // Find matching prospect by LinkedIn URL
+  // Lead info
+  const lead = (body.lead ?? {}) as Record<string, unknown>
+  const profileUrl = String(lead.profile_url ?? lead.profileUrl ?? "")
+  const leadId     = String(lead.id ?? body.leadId ?? body.lead_id ?? "")
+
+  // Campaign
+  const campaign   = (body.campaign ?? {}) as Record<string, unknown>
+  const campaignId = String(campaign.id ?? body.campaignId ?? body.campaign_id ?? "")
+
+  // Sender (the lead who replied)
+  const sender          = (body.sender ?? {}) as Record<string, unknown>
+  const senderFirstName = String(sender.first_name ?? sender.firstName ?? lead.first_name ?? "")
+  const senderLastName  = String(sender.last_name  ?? sender.lastName  ?? lead.last_name  ?? "")
+  const senderName      = [senderFirstName, senderLastName].filter(Boolean).join(" ")
+
+  // Timestamps & IDs
+  const repliedAt      = String(body.timestamp ?? body.createdAt ?? body.created_at ?? new Date().toISOString())
+  const replyMessageId = String(body.correlation_id ?? body.conversation_id ?? body.messageId ?? "")
+
+  // ── Match prospect by LinkedIn URL ──────────────────────────────────────────
   let prospectId: string | null = null
   let dbCampaignId: string | null = null
   if (profileUrl) {
+    // Extract slug from /in/SLUG/ or /company/SLUG/
+    const slug = profileUrl.split("/in/")[1]?.split("/")[0]
+              ?? profileUrl.split("/company/")[1]?.split("/")[0]
+              ?? profileUrl
     const { data: prospect } = await supabaseAdmin
       .from("prospects")
       .select("id, campaign_id")
-      .ilike("linkedin_url", `%${profileUrl.split("/in/")[1]?.split("/")[0] ?? profileUrl}%`)
+      .ilike("linkedin_url", `%${slug}%`)
       .maybeSingle()
     if (prospect) {
-      prospectId = prospect.id
+      prospectId   = prospect.id
       dbCampaignId = prospect.campaign_id
     }
   }
 
+  // ── Insert reply ────────────────────────────────────────────────────────────
   const { data: inserted, error } = await supabaseAdmin
     .from("prospect_replies")
     .insert({
-      prospect_id: prospectId,
-      campaign_id: dbCampaignId,
-      source: "heyreach",
-      external_lead_id: leadId,
-      external_campaign_id: campaignId,
-      reply_message_id: replyMessageId,
-      replied_at: repliedAt,
-      body: replyBody,
-      sender_name: senderName || null,
-      sender_email: null,
-      status: "pending_review",
+      prospect_id:         prospectId,
+      campaign_id:         dbCampaignId,
+      source:              "heyreach",
+      external_lead_id:    leadId || null,
+      external_campaign_id: campaignId || null,
+      reply_message_id:    replyMessageId || null,
+      replied_at:          repliedAt,
+      body:                replyBody,
+      sender_name:         senderName || null,
+      sender_email:        String(lead.email_address ?? sender.email_address ?? "") || null,
+      status:              "pending_review",
     })
     .select("id")
     .single()
@@ -74,10 +97,6 @@ export async function POST(req: NextRequest) {
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
-
-  after(async () => {
-    await analyzeReply(inserted.id)
-  })
 
   return NextResponse.json({ ok: true, id: inserted.id })
 }

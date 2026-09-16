@@ -31,6 +31,7 @@ export type DistributionTemplate = {
   name: string
   industry: string | null
   notes: string | null
+  shortlist_filter: "all" | "only" | "exclude"
   routes: DistributionRoute[]
 }
 
@@ -86,6 +87,7 @@ export async function getTemplates(): Promise<DistributionTemplate[]> {
 export async function saveTemplate(template: {
   id?: string
   name: string
+  shortlist_filter?: "all" | "only" | "exclude"
   industry: string | null
   notes: string | null
   routes: Omit<DistributionRoute, "id">[]
@@ -94,7 +96,7 @@ export async function saveTemplate(template: {
     // Update existing
     await supabaseAdmin
       .from("distribution_templates")
-      .update({ name: template.name, industry: template.industry, notes: template.notes })
+      .update({ name: template.name, industry: template.industry, notes: template.notes, shortlist_filter: template.shortlist_filter ?? "all" })
       .eq("id", template.id)
 
     // Replace all routes
@@ -110,7 +112,7 @@ export async function saveTemplate(template: {
     // Create new
     const { data, error } = await supabaseAdmin
       .from("distribution_templates")
-      .insert({ name: template.name, industry: template.industry, notes: template.notes })
+      .insert({ name: template.name, industry: template.industry, notes: template.notes, shortlist_filter: template.shortlist_filter ?? "all" })
       .select("id")
       .single()
     if (error || !data) throw new Error(error?.message ?? "Error al crear plantilla")
@@ -135,7 +137,7 @@ export async function cloneTemplate(templateId: string): Promise<string> {
 
   const { data: newT, error } = await supabaseAdmin
     .from("distribution_templates")
-    .insert({ name: `${t.name} (copia)`, industry: t.industry, notes: t.notes })
+    .insert({ name: `${t.name} (copia)`, industry: t.industry, notes: t.notes, shortlist_filter: t.shortlist_filter ?? "all" })
     .select("id")
     .single()
   if (error || !newT) throw new Error(error?.message ?? "Error al clonar")
@@ -216,6 +218,7 @@ type ProspectForDistribution = {
   company_name: string
   started_role_months: number | null
   sent_at: string | null
+  shortlisted: boolean
 }
 
 function evaluateCondition(prospect: ProspectForDistribution, cond: Condition): boolean {
@@ -261,6 +264,9 @@ function evaluateCondition(prospect: ProspectForDistribution, cond: Condition): 
     if (operator === "gte") return prospect.started_role_months >= v
     if (operator === "lte") return prospect.started_role_months <= v
     if (operator === "eq") return prospect.started_role_months === v
+  }
+  if (field === "shortlisted") {
+    return value === "true" ? prospect.shortlisted === true : prospect.shortlisted !== true
   }
   return false
 }
@@ -333,7 +339,7 @@ export async function runDistribution(
     // Fetch prospects
     let query = supabaseAdmin
       .from("prospects")
-      .select("id, first_name, last_name, full_name, email, email_status, icp_score, icp_category, os_score, is_premium, connection_degree, linkedin_url, company_name, started_role_months, sent_at")
+      .select("id, first_name, last_name, full_name, email, email_status, icp_score, icp_category, os_score, is_premium, connection_degree, linkedin_url, company_name, started_role_months, sent_at, shortlisted")
       .eq("campaign_id", sourceCampaignId)
 
     if (!includePreviouslySent) {
@@ -341,7 +347,15 @@ export async function runDistribution(
     }
 
     const { data: prospects } = await query
-    const allProspects = (prospects ?? []) as ProspectForDistribution[]
+    let allProspects = (prospects ?? []) as ProspectForDistribution[]
+
+    // Global shortlist pre-filter (stored on template, applied before route conditions)
+    const shortlistFilter = (t.shortlist_filter ?? "all") as "all" | "only" | "exclude"
+    if (shortlistFilter === "only") {
+      allProspects = allProspects.filter((p) => p.shortlisted === true)
+    } else if (shortlistFilter === "exclude") {
+      allProspects = allProspects.filter((p) => p.shortlisted !== true)
+    }
 
     // Evaluate each route
     const routeResults: RunResults["routes"] = []
@@ -474,7 +488,7 @@ export async function previewDistributionRoutes(
 ): Promise<RoutePreviewResult> {
   const { data: prospects } = await supabaseAdmin
     .from("prospects")
-    .select("id, email, email_status, icp_score, icp_category, os_score, is_premium, connection_degree, linkedin_url, started_role_months, sent_at")
+    .select("id, email, email_status, icp_score, icp_category, os_score, is_premium, connection_degree, linkedin_url, started_role_months, sent_at, shortlisted")
     .eq("campaign_id", campaignId)
 
   const all = (prospects ?? []) as ProspectForDistribution[]
